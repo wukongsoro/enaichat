@@ -41,6 +41,7 @@ class Configuration:
     # Environment mode
     ENV_MODE: EnvMode = EnvMode.LOCAL
     
+    
     # Subscription tier IDs - Production
     STRIPE_FREE_TIER_ID_PROD: str = 'price_1RILb4G6l1KZGqIrK4QLrx9i'
     STRIPE_TIER_2_20_ID_PROD: str = 'price_1RILb4G6l1KZGqIrhomjgDnO'
@@ -294,6 +295,7 @@ class Configuration:
     # Search and other API keys
     TAVILY_API_KEY: str
     RAPID_API_KEY: str
+    SERPER_API_KEY: Optional[str] = None
     CLOUDFLARE_API_TOKEN: Optional[str] = None
     FIRECRAWL_API_KEY: str
     FIRECRAWL_URL: Optional[str] = "https://api.firecrawl.dev"
@@ -309,8 +311,8 @@ class Configuration:
     STRIPE_PRODUCT_ID_STAGING: str = 'prod_SCgIj3G7yPOAWY'
     
     # Sandbox configuration
-    SANDBOX_IMAGE_NAME = "kortix/suna:0.1.3.13"
-    SANDBOX_SNAPSHOT_NAME = "kortix/suna:0.1.3.13"
+    SANDBOX_IMAGE_NAME = "kortix/suna:0.1.3.16"
+    SANDBOX_SNAPSHOT_NAME = "kortix/suna:0.1.3.16"
     SANDBOX_ENTRYPOINT = "/usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf"
 
     # LangFuse configuration

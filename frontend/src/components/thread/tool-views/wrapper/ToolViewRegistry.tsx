@@ -79,6 +79,7 @@ const defaultRegistry: ToolViewRegistryType = {
   'web-search': WebSearchToolView,
   'crawl-webpage': WebCrawlToolView,
   'scrape-webpage': WebScrapeToolView,
+  'image-search': WebSearchToolView,
 
   'execute-data-provider-call': ExecuteDataProviderCallToolView,
   'get-data-provider-endpoints': DataProviderEndpointsToolView,
@@ -100,7 +101,8 @@ const defaultRegistry: ToolViewRegistryType = {
 
   'expose-port': ExposePortToolView,
 
-  'see-image': SeeImageToolView,
+  'load-image': SeeImageToolView,
+  'clear-images-from-context': SeeImageToolView,
   'image-edit-or-generate': ImageEditGenerateToolView,
 
   'ask': AskToolView,

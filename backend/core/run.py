@@ -21,8 +21,9 @@ from core.tools.expand_msg_tool import ExpandMessageTool
 from core.prompts.prompt import get_system_prompt
 
 from core.utils.logger import logger
+from core.utils.llm_cache_utils import format_message_with_cache
 
-from core.services.billing import check_billing_status
+from billing.billing_integration import billing_integration
 from core.tools.sb_vision_tool import SandboxVisionTool
 from core.tools.sb_image_edit_tool import SandboxImageEditTool
 from core.tools.sb_presentation_outline_tool import SandboxPresentationOutlineTool
@@ -383,7 +384,6 @@ class PromptManager:
         now = datetime.datetime.now(datetime.timezone.utc)
         datetime_info = f"\n\n=== CURRENT DATE/TIME INFORMATION ===\n"
         datetime_info += f"Today's date: {now.strftime('%A, %B %d, %Y')}\n"
-        datetime_info += f"Current UTC time: {now.strftime('%H:%M:%S UTC')}\n"
         datetime_info += f"Current year: {now.strftime('%Y')}\n"
         datetime_info += f"Current month: {now.strftime('%B')}\n"
         datetime_info += f"Current day: {now.strftime('%A')}\n"
@@ -391,7 +391,8 @@ class PromptManager:
         
         system_content += datetime_info
 
-        return {"role": "system", "content": system_content}
+        system_message = {"role": "system", "content": system_content}
+        return format_message_with_cache(system_message, model_name)
 
 
 class MessageManager:
@@ -473,18 +474,14 @@ class AgentRunner:
     async def setup_tools(self):
         tool_manager = ToolManager(self.thread_manager, self.config.project_id, self.config.thread_id)
         
-        # Use agent ID from agent config if available (for any agent with builder tools enabled)
         agent_id = None
         if self.config.agent_config:
             agent_id = self.config.agent_config.get('agent_id')
         
-        # Convert agent config to disabled tools list
         disabled_tools = self._get_disabled_tools_from_config()
         
-        # Register all tools with exclusions
         tool_manager.register_all_tools(agent_id=agent_id, disabled_tools=disabled_tools)
         
-        # Register Suna-specific tools if this is a Suna default agent or no specific agent is configured
         is_suna_agent = (self.config.agent_config and self.config.agent_config.get('is_suna_default', False)) or (self.config.agent_config is None)
         logger.debug(f"Agent config check: agent_config={self.config.agent_config is not None}, is_suna_default={is_suna_agent}")
         
@@ -495,7 +492,6 @@ class AgentRunner:
             logger.debug("Not a Suna agent, skipping Suna-specific tool registration")
     
     def _register_suna_specific_tools(self, disabled_tools: List[str]):
-        """Register tools specific to Suna (the default agent)."""
         if 'agent_creation_tool' not in disabled_tools:
             from core.tools.agent_creation_tool import AgentCreationTool
             from core.services.supabase import DBConnection
@@ -581,6 +577,7 @@ class AgentRunner:
             self.config.thread_id, 
             mcp_wrapper_instance, self.client
         )
+        logger.info(f"📝 System message built once: {len(str(system_message.get('content', '')))} chars")
         logger.debug(f"model_name received: {self.config.model_name}")
         iteration_count = 0
         continue_execution = True
@@ -599,9 +596,9 @@ class AgentRunner:
         while continue_execution and iteration_count < self.config.max_iterations:
             iteration_count += 1
 
-            can_run, message, subscription = await check_billing_status(self.client, self.account_id)
+            can_run, message, reservation_id = await billing_integration.check_and_reserve_credits(self.account_id)
             if not can_run:
-                error_msg = f"Billing limit reached: {message}"
+                error_msg = f"Insufficient credits: {message}"
                 yield {
                     "type": "status",
                     "status": "stopped",
@@ -616,11 +613,66 @@ class AgentRunner:
                     continue_execution = False
                     break
 
-            temporary_message = await message_manager.build_temporary_message()
+            temporary_message = None
             max_tokens = self.get_max_tokens()
             logger.debug(f"max_tokens: {max_tokens}")
             generation = self.config.trace.generation(name="thread_manager.run_thread") if self.config.trace else None
             try:
+                cache_metrics = None
+                from core.utils.llm_cache_utils import is_cache_supported, needs_cache_probe
+                
+                if self.config.stream and needs_cache_probe(self.config.model_name):
+                    logger.info(f"🔍 Making cache probe for {self.config.model_name} (doesn't send cache metrics in streaming)...")
+                    
+                    try:
+                        from core.services.llm import make_llm_api_call
+                        existing_messages = await self.thread_manager.get_llm_messages(self.config.thread_id)
+                        if existing_messages and len(existing_messages) > 0:
+                            probe_messages = [system_message] + existing_messages[-4:]  # Last 4 messages
+                        else:
+                            probe_messages = [system_message]
+                        
+                        probe_messages.append({
+                            "role": "user", 
+                            "content": "."
+                        })
+                        
+                        probe_response = await make_llm_api_call(
+                            messages=probe_messages,
+                            model_name=self.config.model_name,
+                            temperature=0,
+                            max_tokens=1,
+                            stream=False
+                        )
+                        
+                        if hasattr(probe_response, 'usage'):
+                            usage = probe_response.usage
+                            cache_creation = getattr(usage, 'cache_creation_input_tokens', 0)
+                            cache_read = getattr(usage, 'cache_read_input_tokens', 0)
+                            total_prompt = getattr(usage, 'prompt_tokens', 0)
+                            
+                            if cache_read > 0 or cache_creation > 0:
+                                cache_percentage = (cache_read / total_prompt * 100) if total_prompt > 0 else 0
+                                logger.info(f"✅ CACHE PROBE: {cache_read}/{total_prompt} tokens cached ({cache_percentage:.1f}%), {cache_creation} created")
+                                
+                                cache_metrics = {
+                                    'cache_read_tokens': cache_read,
+                                    'cache_creation_tokens': cache_creation,
+                                    'cache_percentage': cache_percentage,
+                                    'total_prompt_tokens': total_prompt
+                                }
+                            else:
+                                logger.info(f"📊 CACHE PROBE: No cache activity (total prompt: {total_prompt} tokens)")
+                                cache_metrics = {
+                                    'cache_read_tokens': 0,
+                                    'cache_creation_tokens': 0,
+                                    'cache_percentage': 0,
+                                    'total_prompt_tokens': total_prompt
+                                }
+                    
+                    except Exception as e:
+                        logger.warning(f"Cache probe failed (continuing with streaming): {e}")
+                
                 response = await self.thread_manager.run_thread(
                     thread_id=self.config.thread_id,
                     system_prompt=system_message,
@@ -644,7 +696,8 @@ class AgentRunner:
                     enable_thinking=self.config.enable_thinking,
                     reasoning_effort=self.config.reasoning_effort,
                     enable_context_manager=self.config.enable_context_manager,
-                    generation=generation
+                    generation=generation,
+                    cache_metrics=cache_metrics
                 )
 
                 if isinstance(response, dict) and "status" in response and response["status"] == "error":
