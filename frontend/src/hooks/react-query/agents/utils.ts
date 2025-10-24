@@ -5,8 +5,8 @@ const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || '';
 export type Agent = {
   agent_id: string;
   name: string;
-  description?: string;
   system_prompt: string;
+  model?: string | null;
   configured_mcps: Array<{
     name: string;
     config: Record<string, any>;
@@ -25,7 +25,6 @@ export type Agent = {
   tags?: string[];
   created_at: string;
   updated_at: string;
-  profile_image_url?: string;
   icon_name?: string | null;
   icon_color?: string | null;
   icon_background?: string | null;
@@ -33,6 +32,9 @@ export type Agent = {
   version_count?: number;
   current_version?: AgentVersion | null;
   metadata?: {
+    template_name?: string;
+    kortix_template_id?: string;
+    is_kortix_team?: boolean;
     is_suna_default?: boolean;
     centrally_managed?: boolean;
     management_version?: string;
@@ -40,7 +42,6 @@ export type Agent = {
       system_prompt_editable?: boolean;
       tools_editable?: boolean;
       name_editable?: boolean;
-      description_editable?: boolean;
       mcps_editable?: boolean;
     };
     installation_date?: string;
@@ -97,9 +98,6 @@ export type AgentCreateRequest = {
   }>;
   agentpress_tools?: Record<string, any>;
   is_default?: boolean;
-  // New
-  profile_image_url?: string;
-  // Icon system fields
   icon_name?: string | null;
   icon_color?: string | null;
   icon_background?: string | null;
@@ -107,7 +105,7 @@ export type AgentCreateRequest = {
 
 export type AgentVersionCreateRequest = {
   system_prompt: string;
-  model?: string;  // Add model field
+  model?: string;
   configured_mcps?: Array<{
     name: string;
     config: Record<string, any>;
@@ -144,6 +142,7 @@ export type AgentUpdateRequest = {
   name?: string;
   description?: string;
   system_prompt?: string;
+  model?: string | null;
   configured_mcps?: Array<{
     name: string;
     config: Record<string, any>;
@@ -156,13 +155,9 @@ export type AgentUpdateRequest = {
   }>;
   agentpress_tools?: Record<string, any>;
   is_default?: boolean;
-  // New
-  profile_image_url?: string;
-  // Icon system fields
   icon_name?: string | null;
   icon_color?: string | null;
   icon_background?: string | null;
-  // MCP replacement flag
   replace_mcps?: boolean;
 };
 

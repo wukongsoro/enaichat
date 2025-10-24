@@ -40,7 +40,7 @@ import { createQueryHook } from '@/hooks/use-query';
 import { agentKeys } from '@/hooks/react-query/agents/keys';
 import { getAgents } from '@/hooks/react-query/agents/utils';
 import { AgentRunLimitDialog } from '@/components/thread/agent-run-limit-dialog';
-import { Examples } from '@/components/dashboard/examples';
+import { useAgentSelection } from '@/lib/stores/agent-selection-store';
 
 // Custom dialog overlay with blur effect
 const BlurredDialogOverlay = () => (
@@ -96,12 +96,18 @@ export function HeroSection() {
   const scrollTimeout = useRef<NodeJS.Timeout | null>(null);
   const { scrollY } = useScroll();
   const [inputValue, setInputValue] = useState('');
-  const [selectedAgentId, setSelectedAgentId] = useState<string | undefined>();
   const router = useRouter();
+  
+  // Use the agent selection store for localStorage persistence
+  const { 
+    selectedAgentId, 
+    setSelectedAgent, 
+    initializeFromAgents 
+  } = useAgentSelection();
   const { user, isLoading } = useAuth();
   const { billingError, handleBillingError, clearBillingError } =
     useBillingError();
-  const { data: accounts } = useAccounts();
+  const { data: accounts } = useAccounts({ enabled: !!user });
   const personalAccount = accounts?.find((account) => account.personal_account);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const initiateAgentMutation = useInitiateAgentMutation();
@@ -134,6 +140,13 @@ export function HeroSection() {
   )();
 
   const agents = agentsResponse?.agents || [];
+
+  // Initialize agent selection from localStorage when agents are loaded
+  useEffect(() => {
+    if (agents.length > 0) {
+      initializeFromAgents(agents);
+    }
+  }, [agents, initializeFromAgents]);
 
   // Auth dialog state
   const [authDialogOpen, setAuthDialogOpen] = useState(false);
@@ -194,7 +207,7 @@ export function HeroSection() {
   // Handle ChatInput submission
   const handleChatInputSubmit = async (
     message: string,
-    options?: { model_name?: string; enable_thinking?: boolean }
+    options?: { model_name?: string }
   ) => {
     if ((!message.trim() && !chatInputRef.current?.getPendingFiles().length) || isSubmitting) return;
 
@@ -226,9 +239,7 @@ export function HeroSection() {
       });
 
       if (options?.model_name) formData.append('model_name', options.model_name);
-      formData.append('enable_thinking', String(options?.enable_thinking ?? false));
-      formData.append('reasoning_effort', 'low');
-      formData.append('stream', 'true');
+      formData.append('stream', 'true'); // Always stream for better UX
       formData.append('enable_context_manager', 'false');
 
       const result = await initiateAgentMutation.mutateAsync(formData);
@@ -387,19 +398,16 @@ export function HeroSection() {
                   onChange={setInputValue}
                   isLoggedIn={!!user}
                   selectedAgentId={selectedAgentId}
-                  onAgentSelect={setSelectedAgentId}
+                  onAgentSelect={setSelectedAgent}
                   autoFocus={false}
                   enableAdvancedConfig={false}
+                  animatePlaceholder={true}
                 />
               </div>
               {/* Subtle glow effect */}
               <div className="absolute -bottom-4 inset-x-0 h-6 bg-secondary/20 blur-xl rounded-full -z-10 opacity-70"></div>
             </div>
             
-            {/* Examples section - right after chat input */}
-            <div className="w-full pt-2">
-              <Examples onSelectPrompt={setInputValue} count={tablet ? 2 : 4} />
-            </div>
           </div>
 
         </div>

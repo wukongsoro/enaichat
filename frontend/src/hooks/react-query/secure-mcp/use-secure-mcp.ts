@@ -26,31 +26,49 @@ export interface TestCredentialResponse {
   error_details?: string;
 }
 
+export interface UsageExampleMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  tool_calls?: Array<{
+    name: string;
+    arguments?: Record<string, any>;
+  }>;
+}
+
 export interface AgentTemplate {
   template_id: string;
   creator_id: string;
   name: string;
   description?: string;
+  system_prompt?: string;
   mcp_requirements: MCPRequirement[];
   agentpress_tools: Record<string, any>;
   tags: string[];
+  categories: string[];
   is_public: boolean;
   download_count: number;
   marketplace_published_at?: string;
   created_at: string;
   creator_name?: string;
-  avatar?: string;
-  avatar_color?: string;
-  profile_image_url?: string;
   icon_name?: string;
   icon_color?: string;
   icon_background?: string;
   is_kortix_team?: boolean;
+  usage_examples?: UsageExampleMessage[];
   metadata?: {
     source_agent_id?: string;
     source_version_id?: string;
     source_version_name?: string;
     model?: string;
+  };
+  config?: {
+    triggers?: Array<{
+      name: string;
+      description?: string;
+      trigger_type: string;
+      is_active: boolean;
+      config: Record<string, any>;
+    }>;
   };
 }
 
@@ -59,7 +77,7 @@ export interface MCPRequirement {
   display_name: string;
   enabled_tools: string[];
   required_config: string[];
-  custom_type?: 'sse' | 'http'; // For custom MCP servers
+  custom_type?: 'sse' | 'http';
 }
 
 export interface InstallTemplateRequest {
@@ -68,11 +86,14 @@ export interface InstallTemplateRequest {
   custom_system_prompt?: string;
   profile_mappings?: Record<string, string>;
   custom_mcp_configs?: Record<string, Record<string, any>>;
+  trigger_configs?: Record<string, Record<string, any>>;
+  trigger_variables?: Record<string, Record<string, string>>;
 }
 
 export interface InstallationResponse {
   status: 'installed' | 'configs_required';
   instance_id?: string;
+  name?: string;
   missing_regular_credentials?: {
     qualified_name: string;
     display_name: string;
@@ -84,6 +105,13 @@ export interface InstallationResponse {
     custom_type: string;
     required_config: string[];
   }[];
+  missing_trigger_variables?: Record<string, {
+    trigger_name: string;
+    trigger_index: number;
+    variables: string[];
+    agent_prompt: string;
+    missing_variables?: string[];
+  }>;
   template?: {
     template_id: string;
     name: string;
@@ -95,11 +123,8 @@ export interface CreateTemplateRequest {
   agent_id: string;
   make_public?: boolean;
   tags?: string[];
+  usage_examples?: UsageExampleMessage[];
 }
-
-// =====================================================
-// CREDENTIAL MANAGEMENT HOOKS
-// =====================================================
 
 export function useUserCredentials() {
   return useQuery({
@@ -358,7 +383,15 @@ export function usePublishTemplate() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async ({ template_id, tags }: { template_id: string; tags?: string[] }): Promise<{ message: string }> => {
+    mutationFn: async ({ 
+      template_id, 
+      tags,
+      usage_examples 
+    }: { 
+      template_id: string; 
+      tags?: string[];
+      usage_examples?: UsageExampleMessage[];
+    }): Promise<{ message: string }> => {
       const supabase = createClient();
       const { data: { session } } = await supabase.auth.getSession();
 
@@ -372,7 +405,7 @@ export function usePublishTemplate() {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${session.access_token}`,
         },
-        body: JSON.stringify({ tags }),
+        body: JSON.stringify({ tags, usage_examples }),
       });
 
       if (!response.ok) {
@@ -458,9 +491,29 @@ export function useDeleteTemplate() {
 }
 
 export function useKortixTeamTemplates() {
-  return useMarketplaceTemplates({
-    is_kortix_team: true,
-    limit: 10
+  return useQuery({
+    queryKey: ['secure-mcp', 'kortix-templates-all'],
+    queryFn: async (): Promise<MarketplaceTemplatesResponse> => {
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+
+      if (!session) {
+        throw new Error('You must be logged in to view Kortix templates');
+      }
+
+      const response = await fetch(`${API_URL}/templates/kortix-all`, {
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+        },
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
+        throw new Error(errorData.message || `HTTP ${response.status}: ${response.statusText}`);
+      }
+      
+      return response.json();
+    },
   });
 }
 
@@ -492,7 +545,6 @@ export function useInstallTemplate() {
         
         if (isAgentLimitError) {
           const { AgentCountLimitError } = await import('@/lib/api');
-          // Use the nested detail if it exists, otherwise use the errorData directly
           const errorDetail = errorData.detail || errorData;
           throw new AgentCountLimitError(response.status, errorDetail);
         }

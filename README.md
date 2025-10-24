@@ -175,7 +175,7 @@ Kortix can be self-hosted on your own infrastructure using our comprehensive set
 - **🛡️ Security**: Daytona setup for secure agent execution environments
 - **🤖 AI Integration**: LLM providers (Anthropic, OpenAI, OpenRouter, etc.)
 - **🌐 Web Capabilities**: Search and scraping (Tavily, Firecrawl)
-- **📋 Workflows**: QStash for background job processing
+- **📋 Workflows**: Background job processing
 - **🔗 Automation**: Webhook handling for automated tasks
 - **📊 Data Sources**: Optional RapidAPI integrations
 

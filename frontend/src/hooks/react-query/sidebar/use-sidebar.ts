@@ -87,6 +87,8 @@ export type ThreadWithProject = {
   projectName: string;
   url: string;
   updatedAt: string;
+  // Icon system field for thread categorization
+  iconName?: string | null;
 };
 
 export const processThreadsWithProjects = (
@@ -108,10 +110,9 @@ export const processThreadsWithProjects = (
     if (!project) {
       continue;
     }
+    // Use dedicated icon_name field from backend
     let displayName = project.name || 'Unnamed Project';
-    if (thread.metadata?.is_workflow_execution && thread.metadata?.workflow_run_name) {
-      displayName = thread.metadata.workflow_run_name;
-    }
+    const iconName = project.icon_name; // Get icon from dedicated database field
 
     threadsWithProjects.push({
       threadId: thread.thread_id,
@@ -120,6 +121,8 @@ export const processThreadsWithProjects = (
       url: `/projects/${projectId}/thread/${thread.thread_id}`,
       updatedAt:
         thread.updated_at || project.updated_at || new Date().toISOString(),
+      // Use dedicated field or parsed embedded data
+      iconName: iconName,
     });
   }
 

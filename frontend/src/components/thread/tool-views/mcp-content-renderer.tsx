@@ -1,6 +1,6 @@
 import React from 'react';
 import { ContentFormat, FormatDetectionResult } from './mcp-format-detector';
-import { MarkdownRenderer } from '@/components/file-renderers/markdown-renderer';
+import { Markdown } from '@/components/ui/markdown';
 import { CsvRenderer } from '@/components/thread/preview-renderers/csv-renderer';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Card } from '@/components/ui/card';
@@ -241,6 +241,8 @@ function JsonRenderer({ data }: { data: any }) {
 
 // Renderer for key-value pairs
 function KeyValueRenderer({ content }: { content: string }) {
+  if (!content || typeof content !== 'string') return <div>No content available</div>;
+  
   const lines = content.split('\n').filter(line => line.includes(':'));
   const pairs = lines.map(line => {
     const [key, ...valueParts] = line.split(':');
@@ -361,7 +363,7 @@ export function MCPContentRenderer({ detectionResult, rawContent }: MCPContentRe
               Markdown Content
             </span>
           </div>
-          <MarkdownRenderer content={contentStr} />
+          <Markdown>{contentStr}</Markdown>
         </div>
       );
 

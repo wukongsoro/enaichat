@@ -7,45 +7,51 @@ from datetime import datetime, timezone
 from typing import Optional, List, Tuple, Dict
 from fastapi import APIRouter, HTTPException, Depends, Request, Body, File, UploadFile, Form
 from fastapi.responses import StreamingResponse
-
 from core.utils.auth_utils import verify_and_get_user_id_from_jwt, get_user_id_from_stream_auth, verify_and_authorize_thread_access
 from core.utils.logger import logger, structlog
-from core.services.billing import can_use_model
-from billing.billing_integration import billing_integration
-from core.utils.config import config
+from core.billing.billing_integration import billing_integration
+from core.utils.config import config, EnvMode
 from core.services import redis
 from core.sandbox.sandbox import create_sandbox, delete_sandbox
+from core.utils.sandbox_utils import generate_unique_filename, get_uploads_directory
 from run_agent_background import run_agent_background
+
 from core.ai_models import model_manager
 
 from .api_models import AgentStartRequest, AgentVersionResponse, AgentResponse, ThreadAgentResponse, InitiateAgentResponse
 from . import core_utils as utils
+
 from .core_utils import (
-    stop_agent_run_with_helpers as stop_agent_run, get_agent_run_with_access_check, 
-    _get_version_service, generate_and_update_project_name
+    stop_agent_run_with_helpers as stop_agent_run,
+    _get_version_service, generate_and_update_project_name,
+    check_agent_run_limit, check_project_count_limit
 )
-from .config_helper import extract_agent_config
-from .core_utils import check_agent_run_limit, check_project_count_limit
 
-router = APIRouter()
+router = APIRouter(tags=["agent-runs"])
 
-async def check_billing_status(client, user_id: str) -> Tuple[bool, str, Optional[Dict]]:
+async def _get_agent_run_with_access_check(client, agent_run_id: str, user_id: str):
     """
-    Compatibility wrapper for the new credit-based billing system.
-    Converts new credit system response to match old billing status format.
+    Get an agent run and verify the user has access to it.
+    
+    Internal helper for this module only.
     """
-    can_run, message, reservation_id = await billing_integration.check_and_reserve_credits(user_id)
+    from core.utils.auth_utils import verify_and_authorize_thread_access
     
-    # Create a subscription-like object for backward compatibility
-    subscription_info = {
-        "price_id": "credit_based",
-        "plan_name": "Credit System",
-        "minutes_limit": "credit based"
-    }
-    
-    return can_run, message, subscription_info
+    agent_run = await client.table('agent_runs').select('*, threads(account_id)').eq('id', agent_run_id).execute()
+    if not agent_run.data:
+        raise HTTPException(status_code=404, detail="Agent run not found")
 
-@router.post("/thread/{thread_id}/agent/start")
+    agent_run_data = agent_run.data[0]
+    thread_id = agent_run_data['thread_id']
+    account_id = agent_run_data['threads']['account_id']
+    
+    if account_id == user_id:
+        return agent_run_data
+        
+    await verify_and_authorize_thread_access(client, thread_id, user_id)
+    return agent_run_data
+
+@router.post("/thread/{thread_id}/agent/start", summary="Start Agent Run", operation_id="start_agent_run")
 async def start_agent(
     thread_id: str,
     body: AgentStartRequest = Body(...),
@@ -64,13 +70,17 @@ async def start_agent(
 
     # Log the model name after alias resolution using new model manager
     from core.ai_models import model_manager
-    resolved_model = model_manager.resolve_model_id(model_name)
-    logger.debug(f"Resolved model name: {resolved_model}")
+    
+    # Handle None model_name - resolve only if provided
+    if model_name:
+        resolved_model = model_manager.resolve_model_id(model_name)
+        logger.debug(f"Resolved model name: {resolved_model}")
+        # Update model_name to use the resolved version
+        model_name = resolved_model
+    else:
+        logger.debug(f"No model_name specified, will use default for user")
 
-    # Update model_name to use the resolved version
-    model_name = resolved_model
-
-    logger.debug(f"Starting new agent for thread: {thread_id} with config: model={model_name}, thinking={body.enable_thinking}, effort={body.reasoning_effort}, stream={body.stream}, context_manager={body.enable_context_manager} (Instance: {utils.instance_id})")
+    logger.debug(f"Starting new agent for thread: {thread_id} with config: model={model_name} (Instance: {utils.instance_id})")
     client = await utils.db.client
 
 
@@ -92,129 +102,82 @@ async def start_agent(
         thread_metadata=thread_metadata,
     )
     
-    # Load agent configuration with version support
-    agent_config = None
-    effective_agent_id = body.agent_id  # Optional agent ID from request
+    # Load agent configuration using unified loader
+    from .agent_loader import get_agent_loader
+    loader = await get_agent_loader()
     
-    logger.debug(f"[AGENT LOAD] Agent loading flow:")
-    logger.debug(f"  - body.agent_id: {body.agent_id}")
-    logger.debug(f"  - effective_agent_id: {effective_agent_id}")
-
+    agent_data = None
+    effective_agent_id = body.agent_id
+    
+    logger.debug(f"[AGENT LOAD] Loading agent: {effective_agent_id or 'default'}")
+    
+    # Try to load specified agent
     if effective_agent_id:
-        logger.debug(f"[AGENT LOAD] Querying for agent: {effective_agent_id}")
-        # Get agent
-        agent_result = await client.table('agents').select('*').eq('agent_id', effective_agent_id).eq('account_id', account_id).execute()
-        logger.debug(f"[AGENT LOAD] Query result: found {len(agent_result.data) if agent_result.data else 0} agents")
-        
-        if not agent_result.data:
+        try:
+            agent_data = await loader.load_agent(effective_agent_id, user_id, load_config=True)
+            logger.debug(f"Using agent {agent_data.name} ({effective_agent_id}) version {agent_data.version_name}")
+        except HTTPException as e:
             if body.agent_id:
-                raise HTTPException(status_code=404, detail="Agent not found or access denied")
-            else:
-                logger.warning(f"Stored agent_id {effective_agent_id} not found, falling back to default")
-                effective_agent_id = None
-        else:
-            agent_data = agent_result.data[0]
-            version_data = None
-            if agent_data.get('current_version_id'):
-                try:
-                    version_service = await _get_version_service()
-                    version_obj = await version_service.get_version(
-                        agent_id=effective_agent_id,
-                        version_id=agent_data['current_version_id'],
-                        user_id=user_id
-                    )
-                    version_data = version_obj.to_dict()
-                    logger.debug(f"[AGENT LOAD] Got version data from version manager: {version_data.get('version_name')}")
-                except Exception as e:
-                    logger.warning(f"[AGENT LOAD] Failed to get version data: {e}")
-            
-            logger.debug(f"[AGENT LOAD] About to call extract_agent_config with agent_data keys: {list(agent_data.keys())}")
-            logger.debug(f"[AGENT LOAD] version_data type: {type(version_data)}, has data: {version_data is not None}")
-            
-            agent_config = extract_agent_config(agent_data, version_data)
-            
-            if version_data:
-                logger.debug(f"Using agent {agent_config['name']} ({effective_agent_id}) version {agent_config.get('version_name', 'v1')}")
-            else:
-                logger.debug(f"Using agent {agent_config['name']} ({effective_agent_id}) - no version data")
-            source = "request" if body.agent_id else "fallback"
-    else:
-        logger.debug(f"[AGENT LOAD] No effective_agent_id, will try default agent")
-
-    if not agent_config:
-        logger.debug(f"[AGENT LOAD] No agent config yet, querying for default agent")
-        default_agent_result = await client.table('agents').select('*').eq('account_id', account_id).eq('is_default', True).execute()
-        logger.debug(f"[AGENT LOAD] Default agent query result: found {len(default_agent_result.data) if default_agent_result.data else 0} default agents")
+                raise  # Explicit agent not found - fail
+            logger.warning(f"Stored agent_id {effective_agent_id} not found, falling back to default")
+    
+    # Fall back to default agent
+    if not agent_data:
+        logger.debug(f"[AGENT LOAD] Loading default agent")
+        default_agent = await client.table('agents').select('agent_id').eq('account_id', account_id).eq('is_default', True).maybe_single().execute()
         
-        if default_agent_result.data:
-            agent_data = default_agent_result.data[0]
-            
-            # Use versioning system to get current version
-            version_data = None
-            if agent_data.get('current_version_id'):
-                try:
-                    version_service = await _get_version_service()
-                    version_obj = await version_service.get_version(
-                        agent_id=agent_data['agent_id'],
-                        version_id=agent_data['current_version_id'],
-                        user_id=user_id
-                    )
-                    version_data = version_obj.to_dict()
-                    logger.debug(f"[AGENT LOAD] Got default agent version from version manager: {version_data.get('version_name')}")
-                except Exception as e:
-                    logger.warning(f"[AGENT LOAD] Failed to get default agent version data: {e}")
-            
-            logger.debug(f"[AGENT LOAD] About to call extract_agent_config for DEFAULT agent with version data: {version_data is not None}")
-            
-            agent_config = extract_agent_config(agent_data, version_data)
-            
-            if version_data:
-                logger.debug(f"Using default agent: {agent_config['name']} ({agent_config['agent_id']}) version {agent_config.get('version_name', 'v1')}")
-            else:
-                logger.debug(f"Using default agent: {agent_config['name']} ({agent_config['agent_id']}) - no version data")
+        if default_agent.data:
+            agent_data = await loader.load_agent(default_agent.data['agent_id'], user_id, load_config=True)
+            logger.debug(f"Using default agent: {agent_data.name} ({agent_data.agent_id}) version {agent_data.version_name}")
         else:
             logger.warning(f"[AGENT LOAD] No default agent found for account {account_id}")
-
-    logger.debug(f"[AGENT LOAD] Final agent_config: {agent_config is not None}")
+    
+    # Convert to dict for backward compatibility with rest of function
+    agent_config = agent_data.to_dict() if agent_data else None
+    
     if agent_config:
-        logger.debug(f"[AGENT LOAD] Agent config keys: {list(agent_config.keys())}")
         logger.debug(f"Using agent {agent_config['agent_id']} for this agent run (thread remains agent-agnostic)")
 
-    # Run all checks concurrently
-    model_check_task = asyncio.create_task(can_use_model(client, account_id, model_name))
-    billing_check_task = asyncio.create_task(check_billing_status(client, account_id))
-    limit_check_task = asyncio.create_task(check_agent_run_limit(client, account_id))
-
-    # Wait for all checks to complete
-    (can_use, model_message, allowed_models), (can_run, message, subscription), limit_check = await asyncio.gather(
-        model_check_task, billing_check_task, limit_check_task
+    # Unified billing and model access check
+    can_proceed, error_message, context = await billing_integration.check_model_and_billing_access(
+        account_id, model_name, client
     )
-
-    # Check results and raise appropriate errors
-    if not can_use:
-        raise HTTPException(status_code=403, detail={"message": model_message, "allowed_models": allowed_models})
-
-    if not can_run:
-        raise HTTPException(status_code=402, detail={"message": message, "subscription": subscription})
-
-    if not limit_check['can_start']:
-        error_detail = {
-            "message": f"Maximum of {config.MAX_PARALLEL_AGENT_RUNS} parallel agent runs allowed within 24 hours. You currently have {limit_check['running_count']} running.",
-            "running_thread_ids": limit_check['running_thread_ids'],
-            "running_count": limit_check['running_count'],
-            "limit": config.MAX_PARALLEL_AGENT_RUNS
-        }
-        logger.warning(f"Agent run limit exceeded for account {account_id}: {limit_check['running_count']} running agents")
-        raise HTTPException(status_code=429, detail=error_detail)
+    
+    if not can_proceed:
+        if context.get("error_type") == "model_access_denied":
+            raise HTTPException(status_code=403, detail={
+                "message": error_message, 
+                "allowed_models": context.get("allowed_models", [])
+            })
+        elif context.get("error_type") == "insufficient_credits":
+            raise HTTPException(status_code=402, detail={"message": error_message})
+        else:
+            raise HTTPException(status_code=500, detail={"message": error_message})
+    
+    # Check agent run limits (only if not in local mode)
+    if config.ENV_MODE != EnvMode.LOCAL:
+        limit_check = await check_agent_run_limit(client, account_id)
+        if not limit_check['can_start']:
+            error_detail = {
+                "message": f"Maximum of {config.MAX_PARALLEL_AGENT_RUNS} parallel agent runs allowed within 24 hours. You currently have {limit_check['running_count']} running.",
+                "running_thread_ids": limit_check['running_thread_ids'],
+                "running_count": limit_check['running_count'],
+                "limit": config.MAX_PARALLEL_AGENT_RUNS
+            }
+            logger.warning(f"Agent run limit exceeded for account {account_id}: {limit_check['running_count']} running agents")
+            raise HTTPException(status_code=429, detail=error_detail)
 
     effective_model = model_name
     if not model_name and agent_config and agent_config.get('model'):
         effective_model = agent_config['model']
         logger.debug(f"No model specified by user, using agent's configured model: {effective_model}")
-    elif model_name:
-        logger.debug(f"Using user-selected model: {effective_model}")
+    elif not model_name:
+        # No model from user or agent, use default for user's tier
+        from core.ai_models import model_manager
+        effective_model = await model_manager.get_default_model_for_user(client, account_id)
+        logger.debug(f"Using default model for user: {effective_model}")
     else:
-        logger.debug(f"Using default model: {effective_model}")
+        logger.debug(f"Using user-selected model: {effective_model}")
     
     agent_run = await client.table('agent_runs').insert({
         "thread_id": thread_id,
@@ -223,11 +186,7 @@ async def start_agent(
         "agent_id": agent_config.get('agent_id') if agent_config else None,
         "agent_version_id": agent_config.get('current_version_id') if agent_config else None,
         "metadata": {
-            "model_name": effective_model,
-            "requested_model": model_name,
-            "enable_thinking": body.enable_thinking,
-            "reasoning_effort": body.reasoning_effort,
-            "enable_context_manager": body.enable_context_manager
+            "model_name": effective_model
         }
     }).execute()
 
@@ -248,16 +207,14 @@ async def start_agent(
     run_agent_background.send(
         agent_run_id=agent_run_id, thread_id=thread_id, instance_id=utils.instance_id,
         project_id=project_id,
-        model_name=model_name,  # Already resolved above
-        enable_thinking=body.enable_thinking, reasoning_effort=body.reasoning_effort,
-        stream=body.stream, enable_context_manager=body.enable_context_manager,
+        model_name=effective_model,  # Use the resolved effective_model, not the original model_name
         agent_config=agent_config,  # Pass agent configuration
         request_id=request_id,
     )
 
     return {"agent_run_id": agent_run_id, "status": "running"}
 
-@router.post("/agent-run/{agent_run_id}/stop")
+@router.post("/agent-run/{agent_run_id}/stop", summary="Stop Agent Run", operation_id="stop_agent_run")
 async def stop_agent(agent_run_id: str, user_id: str = Depends(verify_and_get_user_id_from_jwt)):
     """Stop a running agent."""
     structlog.contextvars.bind_contextvars(
@@ -265,11 +222,49 @@ async def stop_agent(agent_run_id: str, user_id: str = Depends(verify_and_get_us
     )
     logger.debug(f"Received request to stop agent run: {agent_run_id}")
     client = await utils.db.client
-    await get_agent_run_with_access_check(client, agent_run_id, user_id)
+    await _get_agent_run_with_access_check(client, agent_run_id, user_id)
     await stop_agent_run(agent_run_id)
     return {"status": "stopped"}
 
-@router.get("/thread/{thread_id}/agent-runs")
+@router.get("/agent-runs/active", summary="List All Active Agent Runs", operation_id="list_active_agent_runs")
+async def get_active_agent_runs(user_id: str = Depends(verify_and_get_user_id_from_jwt)):
+    """Get all active (running) agent runs for the current user across all threads."""
+    logger.debug(f"Fetching all active agent runs for user: {user_id}")
+    client = await utils.db.client
+    
+    # Query all running agent runs where the thread belongs to the user
+    # Join with threads table to filter by account_id
+    agent_runs = await client.table('agent_runs').select('id, thread_id, status, started_at').eq('status', 'running').execute()
+    
+    if not agent_runs.data:
+        return {"active_runs": []}
+    
+    # Filter agent runs to only include those from threads the user has access to
+    # Get thread_ids and check access
+    thread_ids = [run['thread_id'] for run in agent_runs.data]
+    
+    # Get threads that belong to the user
+    threads = await client.table('threads').select('thread_id, account_id').in_('thread_id', thread_ids).eq('account_id', user_id).execute()
+    
+    # Create a set of accessible thread IDs
+    accessible_thread_ids = {thread['thread_id'] for thread in threads.data}
+    
+    # Filter agent runs to only include accessible ones
+    accessible_runs = [
+        {
+            'id': run['id'],
+            'thread_id': run['thread_id'],
+            'status': run['status'],
+            'started_at': run['started_at']
+        }
+        for run in agent_runs.data
+        if run['thread_id'] in accessible_thread_ids
+    ]
+    
+    logger.debug(f"Found {len(accessible_runs)} active agent runs for user: {user_id}")
+    return {"active_runs": accessible_runs}
+
+@router.get("/thread/{thread_id}/agent-runs", summary="List Thread Agent Runs", operation_id="list_thread_agent_runs")
 async def get_agent_runs(thread_id: str, user_id: str = Depends(verify_and_get_user_id_from_jwt)):
     """Get all agent runs for a thread."""
     structlog.contextvars.bind_contextvars(
@@ -282,7 +277,7 @@ async def get_agent_runs(thread_id: str, user_id: str = Depends(verify_and_get_u
     logger.debug(f"Found {len(agent_runs.data)} agent runs for thread: {thread_id}")
     return {"agent_runs": agent_runs.data}
 
-@router.get("/agent-run/{agent_run_id}")
+@router.get("/agent-run/{agent_run_id}", summary="Get Agent Run", operation_id="get_agent_run")
 async def get_agent_run(agent_run_id: str, user_id: str = Depends(verify_and_get_user_id_from_jwt)):
     """Get agent run status and responses."""
     structlog.contextvars.bind_contextvars(
@@ -290,7 +285,7 @@ async def get_agent_run(agent_run_id: str, user_id: str = Depends(verify_and_get
     )
     logger.debug(f"Fetching agent run details: {agent_run_id}")
     client = await utils.db.client
-    agent_run_data = await get_agent_run_with_access_check(client, agent_run_id, user_id)
+    agent_run_data = await _get_agent_run_with_access_check(client, agent_run_id, user_id)
     # Note: Responses are not included here by default, they are in the stream or DB
     return {
         "id": agent_run_data['id'],
@@ -301,7 +296,7 @@ async def get_agent_run(agent_run_id: str, user_id: str = Depends(verify_and_get
         "error": agent_run_data['error']
     }
 
-@router.get("/thread/{thread_id}/agent", response_model=ThreadAgentResponse)
+@router.get("/thread/{thread_id}/agent", response_model=ThreadAgentResponse, summary="Get Thread Agent", operation_id="get_thread_agent")
 async def get_thread_agent(thread_id: str, user_id: str = Depends(verify_and_get_user_id_from_jwt)):
     """Get the agent details for a specific thread. Since threads are fully agent-agnostic, 
     this returns the most recently used agent from agent_runs only."""
@@ -407,36 +402,13 @@ async def get_thread_agent(thread_id: str, user_id: str = Depends(verify_and_get
                 'created_by': current_version.created_by
             }
         
-        from .config_helper import extract_agent_config
-        agent_config = extract_agent_config(agent_data, version_data)
-        
-        system_prompt = agent_config['system_prompt']
-        configured_mcps = agent_config['configured_mcps']
-        custom_mcps = agent_config['custom_mcps']
-        agentpress_tools = agent_config['agentpress_tools']
+        # Load agent using unified loader
+        from .agent_loader import get_agent_loader
+        loader = await get_agent_loader()
+        agent_obj = await loader.load_agent(agent_data['agent_id'], user_id, load_config=True)
         
         return {
-            "agent": AgentResponse(
-                agent_id=agent_data['agent_id'],
-                name=agent_data['name'],
-                description=agent_data.get('description'),
-                system_prompt=system_prompt,
-                configured_mcps=configured_mcps,
-                custom_mcps=custom_mcps,
-                agentpress_tools=agentpress_tools,
-                is_default=agent_data.get('is_default', False),
-                is_public=agent_data.get('is_public', False),
-                tags=agent_data.get('tags', []),
-                avatar=agent_config.get('avatar'),
-                avatar_color=agent_config.get('avatar_color'),
-                profile_image_url=agent_config.get('profile_image_url'),
-                created_at=agent_data['created_at'],
-                updated_at=agent_data.get('updated_at', agent_data['created_at']),
-                current_version_id=agent_data.get('current_version_id'),
-                version_count=agent_data.get('version_count', 1),
-                current_version=current_version,
-                metadata=agent_data.get('metadata')
-            ),
+            "agent": agent_obj.to_pydantic_model(),
             "source": agent_source,
             "message": f"Using {agent_source} agent: {agent_data['name']}. Threads are agent-agnostic - you can change agents anytime."
         }
@@ -447,7 +419,7 @@ async def get_thread_agent(thread_id: str, user_id: str = Depends(verify_and_get
         logger.error(f"Error fetching agent for thread {thread_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch thread agent: {str(e)}")
 
-@router.get("/agent-run/{agent_run_id}/stream")
+@router.get("/agent-run/{agent_run_id}/stream", summary="Stream Agent Run", operation_id="stream_agent_run")
 async def stream_agent_run(
     agent_run_id: str,
     token: Optional[str] = None,
@@ -458,7 +430,7 @@ async def stream_agent_run(
     client = await utils.db.client
 
     user_id = await get_user_id_from_stream_auth(request, token) # practically instant
-    agent_run_data = await get_agent_run_with_access_check(client, agent_run_id, user_id) # 1 db query
+    agent_run_data = await _get_agent_run_with_access_check(client, agent_run_id, user_id) # 1 db query
 
     structlog.contextvars.bind_contextvars(
         agent_run_id=agent_run_id,
@@ -627,15 +599,10 @@ async def stream_agent_run(
     })
 
 
-
-@router.post("/agent/initiate", response_model=InitiateAgentResponse)
+@router.post("/agent/initiate", response_model=InitiateAgentResponse, summary="Initiate Agent Session", operation_id="initiate_agent_session")
 async def initiate_agent_with_files(
     prompt: str = Form(...),
     model_name: Optional[str] = Form(None),  # Default to None to use default model
-    enable_thinking: Optional[bool] = Form(False),
-    reasoning_effort: Optional[str] = Form("low"),
-    stream: Optional[bool] = Form(True),
-    enable_context_manager: Optional[bool] = Form(False),
     agent_id: Optional[str] = Form(None),  # Add agent_id parameter
     files: List[UploadFile] = File(default=[]),
     user_id: str = Depends(verify_and_get_user_id_from_jwt)
@@ -651,11 +618,16 @@ async def initiate_agent_with_files(
     # Use model from config if not specified in the request
     logger.debug(f"Original model_name from request: {model_name}")
 
-    if model_name is None:
-        model_name = "openai/gpt-5-mini"
-        logger.debug(f"Using default model: {model_name}")
+    client = await utils.db.client
+    account_id = user_id # In Basejump, personal account_id is the same as user_id
 
     from core.ai_models import model_manager
+    
+    if model_name is None:
+        # Use tier-based default model from registry
+        model_name = await model_manager.get_default_model_for_user(client, account_id)
+        logger.debug(f"Using tier-based default model: {model_name}")
+
     # Log the model name after alias resolution using new model manager
     resolved_model = model_manager.resolve_model_id(model_name)
     logger.debug(f"Resolved model name: {resolved_model}")
@@ -663,131 +635,88 @@ async def initiate_agent_with_files(
     # Update model_name to use the resolved version
     model_name = resolved_model
 
-    logger.debug(f"[\033[91mDEBUG\033[0m] Initiating new agent with prompt and {len(files)} files (Instance: {utils.instance_id}), model: {model_name}, enable_thinking: {enable_thinking}")
-    client = await utils.db.client
-    account_id = user_id # In Basejump, personal account_id is the same as user_id
+    logger.debug(f"Initiating new agent with prompt and {len(files)} files (Instance: {utils.instance_id}), model: {model_name}")
     
-    # Load agent configuration with version support (same as start_agent endpoint)
-    agent_config = None
+    # Load agent configuration using unified loader
+    from .agent_loader import get_agent_loader
+    loader = await get_agent_loader()
     
-    logger.debug(f"[AGENT INITIATE] Agent loading flow:")
-    logger.debug(f"  - agent_id param: {agent_id}")
+    agent_data = None
     
+    logger.debug(f"[AGENT INITIATE] Loading agent: {agent_id or 'default'}")
+    
+    # Try to load specified agent
     if agent_id:
-        logger.debug(f"[AGENT INITIATE] Querying for specific agent: {agent_id}")
-        # Get agent
-        agent_result = await client.table('agents').select('*').eq('agent_id', agent_id).eq('account_id', account_id).execute()
-        logger.debug(f"[AGENT INITIATE] Query result: found {len(agent_result.data) if agent_result.data else 0} agents")
-        
-        if not agent_result.data:
-            raise HTTPException(status_code=404, detail="Agent not found or access denied")
-        
-        agent_data = agent_result.data[0]
-        
-        # Use versioning system to get current version
-        version_data = None
-        if agent_data.get('current_version_id'):
-            try:
-                version_service = await _get_version_service()
-                version_obj = await version_service.get_version(
-                    agent_id=agent_id,
-                    version_id=agent_data['current_version_id'],
-                    user_id=user_id
-                )
-                version_data = version_obj.to_dict()
-                logger.debug(f"[AGENT INITIATE] Got version data from version manager: {version_data.get('version_name')}")
-                logger.debug(f"[AGENT INITIATE] Version data: {version_data}")
-            except Exception as e:
-                logger.warning(f"[AGENT INITIATE] Failed to get version data: {e}")
-        
-        logger.debug(f"[AGENT INITIATE] About to call extract_agent_config with version data: {version_data is not None}")
-        
-        agent_config = extract_agent_config(agent_data, version_data)
-        
-        if version_data:
-            logger.debug(f"Using custom agent: {agent_config['name']} ({agent_id}) version {agent_config.get('version_name', 'v1')}")
-        else:
-            logger.debug(f"Using custom agent: {agent_config['name']} ({agent_id}) - no version data")
+        agent_data = await loader.load_agent(agent_id, user_id, load_config=True)
+        logger.debug(f"Using agent {agent_data.name} ({agent_id}) version {agent_data.version_name}")
     else:
-        logger.debug(f"[AGENT INITIATE] No agent_id provided, querying for default agent")
-        # Try to get default agent for the account
-        default_agent_result = await client.table('agents').select('*').eq('account_id', account_id).eq('is_default', True).execute()
-        logger.debug(f"[AGENT INITIATE] Default agent query result: found {len(default_agent_result.data) if default_agent_result.data else 0} default agents")
+        # Load default agent - ensure Suna is installed first
+        logger.debug(f"[AGENT INITIATE] Loading default agent")
         
-        if default_agent_result.data:
-            agent_data = default_agent_result.data[0]
-            
-            # Use versioning system to get current version
-            version_data = None
-            if agent_data.get('current_version_id'):
-                try:
-                    version_service = await _get_version_service()
-                    version_obj = await version_service.get_version(
-                        agent_id=agent_data['agent_id'],
-                        version_id=agent_data['current_version_id'],
-                        user_id=user_id
-                    )
-                    version_data = version_obj.to_dict()
-                    logger.debug(f"[AGENT INITIATE] Got default agent version from version manager: {version_data.get('version_name')}")
-                except Exception as e:
-                    logger.warning(f"[AGENT INITIATE] Failed to get default agent version data: {e}")
-            
-            logger.debug(f"[AGENT INITIATE] About to call extract_agent_config for DEFAULT agent with version data: {version_data is not None}")
-            
-            agent_config = extract_agent_config(agent_data, version_data)
-            
-            if version_data:
-                logger.debug(f"Using default agent: {agent_config['name']} ({agent_config['agent_id']}) version {agent_config.get('version_name', 'v1')}")
-            else:
-                logger.debug(f"Using default agent: {agent_config['name']} ({agent_config['agent_id']}) - no version data")
+        # Ensure Suna is installed for this account
+        from core.utils.ensure_suna import ensure_suna_installed
+        await ensure_suna_installed(account_id)
+        
+        # Try to find the default agent (Suna)
+        default_agent = await client.table('agents').select('agent_id').eq('account_id', account_id).eq('metadata->>is_suna_default', 'true').maybe_single().execute()
+        
+        if default_agent and default_agent.data:
+            agent_data = await loader.load_agent(default_agent.data['agent_id'], user_id, load_config=True)
+            logger.debug(f"Using default agent: {agent_data.name} ({agent_data.agent_id}) version {agent_data.version_name}")
         else:
             logger.warning(f"[AGENT INITIATE] No default agent found for account {account_id}")
+            raise HTTPException(status_code=404, detail="No default agent available. Please contact support.")
     
-    logger.debug(f"[AGENT INITIATE] Final agent_config: {agent_config is not None}")
-    if agent_config:
-        logger.debug(f"[AGENT INITIATE] Agent config keys: {list(agent_config.keys())}")
+    # Convert to dict for backward compatibility with rest of function
+    agent_config = agent_data.to_dict() if agent_data else None
 
-    # Run all checks concurrently
-    model_check_task = asyncio.create_task(can_use_model(client, account_id, model_name))
-    billing_check_task = asyncio.create_task(check_billing_status(client, account_id))
-    limit_check_task = asyncio.create_task(check_agent_run_limit(client, account_id))
-    project_limit_check_task = asyncio.create_task(check_project_count_limit(client, account_id))
-
-    # Wait for all checks to complete
-    (can_use, model_message, allowed_models), (can_run, message, subscription), limit_check, project_limit_check = await asyncio.gather(
-        model_check_task, billing_check_task, limit_check_task, project_limit_check_task
+    # Unified billing and model access check
+    can_proceed, error_message, context = await billing_integration.check_model_and_billing_access(
+        account_id, model_name, client
     )
+    
+    if not can_proceed:
+        if context.get("error_type") == "model_access_denied":
+            raise HTTPException(status_code=403, detail={
+                "message": error_message, 
+                "allowed_models": context.get("allowed_models", [])
+            })
+        elif context.get("error_type") == "insufficient_credits":
+            raise HTTPException(status_code=402, detail={"message": error_message})
+        else:
+            raise HTTPException(status_code=500, detail={"message": error_message})
+    
+    # Check additional limits (only if not in local mode)
+    if config.ENV_MODE != EnvMode.LOCAL:
+        # Check agent run limit and project limit concurrently
+        limit_check_task = asyncio.create_task(check_agent_run_limit(client, account_id))
+        project_limit_check_task = asyncio.create_task(check_project_count_limit(client, account_id))
+        
+        limit_check, project_limit_check = await asyncio.gather(
+            limit_check_task, project_limit_check_task
+        )
+        
+        # Check agent run limit (maximum parallel runs in past 24 hours)
+        if not limit_check['can_start']:
+            error_detail = {
+                "message": f"Maximum of {config.MAX_PARALLEL_AGENT_RUNS} parallel agent runs allowed within 24 hours. You currently have {limit_check['running_count']} running.",
+                "running_thread_ids": limit_check['running_thread_ids'],
+                "running_count": limit_check['running_count'],
+                "limit": config.MAX_PARALLEL_AGENT_RUNS
+            }
+            logger.warning(f"Agent run limit exceeded for account {account_id}: {limit_check['running_count']} running agents")
+            raise HTTPException(status_code=429, detail=error_detail)
 
-    # Check results and raise appropriate errors
-    if not can_use:
-        raise HTTPException(status_code=403, detail={"message": model_message, "allowed_models": allowed_models})
-
-    can_run, message, subscription = await check_billing_status(client, account_id)
-    if not can_run:
-        raise HTTPException(status_code=402, detail={"message": message, "subscription": subscription})
-
-    # Check agent run limit (maximum parallel runs in past 24 hours)
-    limit_check = await check_agent_run_limit(client, account_id)
-    if not limit_check['can_start']:
-        error_detail = {
-            "message": f"Maximum of {config.MAX_PARALLEL_AGENT_RUNS} parallel agent runs allowed within 24 hours. You currently have {limit_check['running_count']} running.",
-            "running_thread_ids": limit_check['running_thread_ids'],
-            "running_count": limit_check['running_count'],
-            "limit": config.MAX_PARALLEL_AGENT_RUNS
-        }
-        logger.warning(f"Agent run limit exceeded for account {account_id}: {limit_check['running_count']} running agents")
-        raise HTTPException(status_code=429, detail=error_detail)
-
-    if not project_limit_check['can_create']:
-        error_detail = {
-            "message": f"Maximum of {project_limit_check['limit']} projects allowed for your current plan. You have {project_limit_check['current_count']} projects.",
-            "current_count": project_limit_check['current_count'],
-            "limit": project_limit_check['limit'],
-            "tier_name": project_limit_check['tier_name'],
-            "error_code": "PROJECT_LIMIT_EXCEEDED"
-        }
-        logger.warning(f"Project limit exceeded for account {account_id}: {project_limit_check['current_count']}/{project_limit_check['limit']} projects")
-        raise HTTPException(status_code=402, detail=error_detail)
+        if not project_limit_check['can_create']:
+            error_detail = {
+                "message": f"Maximum of {project_limit_check['limit']} projects allowed for your current plan. You have {project_limit_check['current_count']} projects.",
+                "current_count": project_limit_check['current_count'],
+                "limit": project_limit_check['limit'],
+                "tier_name": project_limit_check['tier_name'],
+                "error_code": "PROJECT_LIMIT_EXCEEDED"
+            }
+            logger.warning(f"Project limit exceeded for account {account_id}: {project_limit_check['current_count']}/{project_limit_check['limit']} projects")
+            raise HTTPException(status_code=402, detail=error_detail)
 
     try:
         # 1. Create Project
@@ -885,11 +814,17 @@ async def initiate_agent_with_files(
         if files:
             successful_uploads = []
             failed_uploads = []
+            uploads_dir = get_uploads_directory()
+            
             for file in files:
                 if file.filename:
                     try:
                         safe_filename = file.filename.replace('/', '_').replace('\\', '_')
-                        target_path = f"/workspace/{safe_filename}"
+                        
+                        # Generate unique filename to avoid conflicts
+                        unique_filename = await generate_unique_filename(sandbox, uploads_dir, safe_filename)
+                        target_path = f"{uploads_dir}/{unique_filename}"
+                        
                         logger.debug(f"Attempting to upload {safe_filename} to {target_path} in sandbox {sandbox_id}")
                         content = await file.read()
                         upload_successful = False
@@ -906,14 +841,13 @@ async def initiate_agent_with_files(
                         if upload_successful:
                             try:
                                 await asyncio.sleep(0.2)
-                                parent_dir = os.path.dirname(target_path)
-                                files_in_dir = await sandbox.fs.list_files(parent_dir)
+                                files_in_dir = await sandbox.fs.list_files(uploads_dir)
                                 file_names_in_dir = [f.name for f in files_in_dir]
-                                if safe_filename in file_names_in_dir:
+                                if unique_filename in file_names_in_dir:
                                     successful_uploads.append(target_path)
-                                    logger.debug(f"Successfully uploaded and verified file {safe_filename} to sandbox path {target_path}")
+                                    logger.debug(f"Successfully uploaded and verified file {safe_filename} as {unique_filename} to sandbox path {target_path}")
                                 else:
-                                    logger.error(f"Verification failed for {safe_filename}: File not found in {parent_dir} after upload attempt.")
+                                    logger.error(f"Verification failed for {safe_filename}: File not found in {uploads_dir} after upload attempt.")
                                     failed_uploads.append(safe_filename)
                             except Exception as verify_error:
                                 logger.error(f"Error verifying file {safe_filename} after upload: {str(verify_error)}", exc_info=True)
@@ -938,7 +872,7 @@ async def initiate_agent_with_files(
         message_payload = {"role": "user", "content": message_content}
         await client.table('messages').insert({
             "message_id": message_id, "thread_id": thread_id, "type": "user",
-            "is_llm_message": True, "content": json.dumps(message_payload),
+            "is_llm_message": True, "content": message_payload,  # Store as JSONB object, not JSON string
             "created_at": datetime.now(timezone.utc).isoformat()
         }).execute()
 
@@ -958,11 +892,7 @@ async def initiate_agent_with_files(
             "agent_id": agent_config.get('agent_id') if agent_config else None,
             "agent_version_id": agent_config.get('current_version_id') if agent_config else None,
             "metadata": {
-                "model_name": effective_model,
-                "requested_model": model_name,
-                "enable_thinking": enable_thinking,
-                "reasoning_effort": reasoning_effort,
-                "enable_context_manager": enable_context_manager
+                "model_name": effective_model
             }
         }).execute()
         agent_run_id = agent_run.data[0]['id']
@@ -985,8 +915,6 @@ async def initiate_agent_with_files(
             agent_run_id=agent_run_id, thread_id=thread_id, instance_id=utils.instance_id,
             project_id=project_id,
             model_name=model_name,  # Already resolved above
-            enable_thinking=enable_thinking, reasoning_effort=reasoning_effort,
-            stream=stream, enable_context_manager=enable_context_manager,
             agent_config=agent_config,  # Pass agent configuration
             request_id=request_id,
         )

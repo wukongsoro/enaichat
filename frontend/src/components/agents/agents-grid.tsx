@@ -7,14 +7,14 @@ import { Badge } from '@/components/ui/badge';
 import { useRouter } from 'next/navigation';
 import { useCreateTemplate, useUnpublishTemplate } from '@/hooks/react-query/secure-mcp/use-secure-mcp';
 import { toast } from 'sonner';
-import { AgentCard } from './custom-agents-page/agent-card';
-import { KortixLogo } from '../sidebar/kortix-logo';
-import { DynamicIcon } from 'lucide-react/dynamic';
+import { UnifiedAgentCard } from '@/components/ui/unified-agent-card';
+import { AgentAvatar } from '../thread/content/agent-avatar';
+import { AgentConfigurationDialog } from './agent-configuration-dialog';
+import { isStagingMode } from '@/lib/config';
 
 interface Agent {
   agent_id: string;
   name: string;
-  description?: string;
   is_default: boolean;
   is_public?: boolean;
   marketplace_published_at?: string;
@@ -39,11 +39,9 @@ interface Agent {
       system_prompt_editable?: boolean;
       tools_editable?: boolean;
       name_editable?: boolean;
-      description_editable?: boolean;
       mcps_editable?: boolean;
     };
   };
-  profile_image_url?: string;
   // Icon system fields
   icon_name?: string | null;
   icon_color?: string | null;
@@ -99,28 +97,14 @@ const AgentModal: React.FC<AgentModalProps> = ({
         <DialogTitle className="sr-only">Agent actions</DialogTitle>
         <div className="relative">
           <div className={`p-4 h-24 flex items-start justify-start relative`}>
-            {isSunaAgent ? (
-              <div className="p-6">
-                <KortixLogo size={48} />
-              </div>
-            ) : agent.icon_name ? (
-              <div 
-                className="h-16 w-16 rounded-xl flex items-center justify-center"
-                style={{ backgroundColor: agent.icon_background || '#F3F4F6' }}
-              >
-                <DynamicIcon 
-                  name={agent.icon_name as any} 
-                  size={32} 
-                  color={agent.icon_color || '#000000'}
-                />
-              </div>
-            ) : agent.profile_image_url ? (
-              <img src={agent.profile_image_url} alt={agent.name} className="h-16 w-16 rounded-xl object-cover" />
-            ) : (
-              <div className="h-16 w-16 rounded-xl bg-muted flex items-center justify-center">
-                <span className="text-lg font-semibold">{agent.name.charAt(0).toUpperCase()}</span>
-              </div>
-            )}
+            <AgentAvatar
+              iconName={agent.icon_name}
+              iconColor={agent.icon_color}
+              backgroundColor={agent.icon_background}
+              agentName={agent.name}
+              isSunaDefault={isSunaAgent}
+              size={64}
+            />
           </div>
 
           <div className="p-4 space-y-2">
@@ -142,9 +126,6 @@ const AgentModal: React.FC<AgentModalProps> = ({
                   </Badge>
                 )}
               </div>
-              <p className="text-muted-foreground text-sm leading-relaxed">
-                {truncateDescription(agent.description)}
-              </p>
             </div>
 
             <div className="flex gap-3 pt-2">
@@ -164,7 +145,7 @@ const AgentModal: React.FC<AgentModalProps> = ({
                 Chat
               </Button>
             </div>
-            {!isSunaAgent && (
+            {!isSunaAgent && isStagingMode && (
               <div className="pt-2">
                 {agent.is_public ? (
                   <div className="space-y-2">
@@ -235,6 +216,8 @@ export const AgentsGrid: React.FC<AgentsGridProps> = ({
 }) => {
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
   const [unpublishingId, setUnpublishingId] = useState<string | null>(null);
+  const [showConfigDialog, setShowConfigDialog] = useState(false);
+  const [configAgentId, setConfigAgentId] = useState<string | null>(null);
   const router = useRouter();
   
   const unpublishAgentMutation = useUnpublishTemplate();
@@ -244,8 +227,9 @@ export const AgentsGrid: React.FC<AgentsGridProps> = ({
   };
 
   const handleCustomize = (agentId: string) => {
-    router.push(`/agents/config/${agentId}`);
     setSelectedAgent(null);
+    setConfigAgentId(agentId);
+    setShowConfigDialog(true);
   };
 
   const handleChat = (agentId: string) => {
@@ -299,11 +283,27 @@ export const AgentsGrid: React.FC<AgentsGridProps> = ({
               )}
               
               <div className={`transition-all duration-200 ${isDeleting ? 'opacity-60 scale-95' : ''}`}>
-                <AgentCard
-                  mode="agent"
-                  data={agentData}
-                  styling={undefined}
-                  onClick={() => !isDeleting && handleAgentClick(agent)}
+                <UnifiedAgentCard
+                  variant="agent"
+                  data={{
+                    id: agent.agent_id,
+                    name: agent.name,
+                    tags: agent.tags,
+                    created_at: agent.created_at,
+                    agent_id: agent.agent_id,
+                    is_default: agent.is_default,
+                    is_public: agent.is_public,
+                    marketplace_published_at: agent.marketplace_published_at,
+                    download_count: agent.download_count,
+                    current_version: agent.current_version,
+                    metadata: agent.metadata,
+                    icon_name: agent.icon_name,
+                    icon_color: agent.icon_color,
+                    icon_background: agent.icon_background,
+                  }}
+                  actions={{
+                    onClick: () => !isDeleting && handleAgentClick(agent),
+                  }}
                 />
               </div>
               <div className={`absolute bottom-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity ${isDeleting ? 'pointer-events-none' : ''}`}>
@@ -379,6 +379,17 @@ export const AgentsGrid: React.FC<AgentsGridProps> = ({
         isPublishing={externalPublishingId === selectedAgent?.agent_id}
         isUnpublishing={unpublishingId === selectedAgent?.agent_id}
       />
+      
+      {configAgentId && (
+        <AgentConfigurationDialog
+          open={showConfigDialog}
+          onOpenChange={setShowConfigDialog}
+          agentId={configAgentId}
+          onAgentChange={(newAgentId) => {
+            setConfigAgentId(newAgentId);
+          }}
+        />
+      )}
     </>
   );
 };

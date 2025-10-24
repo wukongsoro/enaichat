@@ -37,7 +37,7 @@ function extractCheckCommandOutputData(
     let output: string | null = null;
     let status: string | null = null;
     let actualIsSuccess = isSuccess;
-    let actualTimestamp = toolTimestamp || assistantTimestamp;
+    const actualTimestamp = toolTimestamp || assistantTimestamp;
 
     // Parse content to extract data
     const parseContent = (content: any): any => {
@@ -55,8 +55,24 @@ function extractCheckCommandOutputData(
     const toolParsed = parseContent(toolContent);
 
     if (toolParsed && typeof toolParsed === 'object') {
+        // First, try to extract directly from tool_execution (the actual format being used)
+        if (toolParsed.tool_execution && toolParsed.tool_execution.result) {
+            const result = toolParsed.tool_execution.result;
+            const args = toolParsed.tool_execution.arguments || {};
+            
+            if (result.output && typeof result.output === 'object') {
+                sessionName = result.output.session_name || args.session_name || null;
+                output = result.output.output || null;
+                status = result.output.status || null;
+            } else if (typeof result.output === 'string') {
+                output = result.output;
+                sessionName = args.session_name || null;
+            }
+            
+            actualIsSuccess = result.success !== undefined ? result.success : actualIsSuccess;
+        }
         // Handle the case where content is a JSON string
-        if (toolParsed.content && typeof toolParsed.content === 'string') {
+        else if (toolParsed.content && typeof toolParsed.content === 'string') {
             try {
                 const contentParsed = JSON.parse(toolParsed.content);
                 if (contentParsed.tool_execution) {
@@ -83,58 +99,6 @@ function extractCheckCommandOutputData(
                 }
             } catch (e) {
                 console.error('Failed to parse toolContent.content:', e);
-            }
-        }
-        // Check for frontend_content first (this is the actual data structure)
-        else if (toolParsed.frontend_content && toolParsed.frontend_content.tool_execution) {
-            const toolExecution = toolParsed.frontend_content.tool_execution;
-
-            if (toolExecution.result && toolExecution.result.output) {
-                if (typeof toolExecution.result.output === 'object') {
-                    // This is the nested format: { output: { output: "...", session_name: "...", status: "..." } }
-                    const nestedOutput = toolExecution.result.output;
-                    output = nestedOutput.output || null;
-                    sessionName = nestedOutput.session_name || null;
-                    status = nestedOutput.status || null;
-                } else if (typeof toolExecution.result.output === 'string') {
-                    // Direct string output
-                    output = toolExecution.result.output;
-                }
-                actualIsSuccess = toolExecution.result.success !== undefined ? toolExecution.result.success : actualIsSuccess;
-            }
-
-            // Extract session name from arguments if not found in output
-            if (!sessionName && toolExecution.arguments) {
-                sessionName = toolExecution.arguments.session_name || null;
-            }
-        }
-        // Fallback to content.content structure
-        else if (toolParsed.content && typeof toolParsed.content === 'object') {
-            if (toolParsed.content.content && typeof toolParsed.content.content === 'string') {
-                try {
-                    const contentParsed = JSON.parse(toolParsed.content.content);
-                    if (contentParsed.tool_execution) {
-                        const toolExecution = contentParsed.tool_execution;
-
-                        if (toolExecution.result && toolExecution.result.output) {
-                            if (typeof toolExecution.result.output === 'object') {
-                                const nestedOutput = toolExecution.result.output;
-                                output = nestedOutput.output || null;
-                                sessionName = nestedOutput.session_name || null;
-                                status = nestedOutput.status || null;
-                            } else if (typeof toolExecution.result.output === 'string') {
-                                output = toolExecution.result.output;
-                            }
-                            actualIsSuccess = toolExecution.result.success !== undefined ? toolExecution.result.success : actualIsSuccess;
-                        }
-
-                        if (!sessionName && toolExecution.arguments) {
-                            sessionName = toolExecution.arguments.session_name || null;
-                        }
-                    }
-                } catch (e) {
-                    console.error('Failed to parse content.content:', e);
-                }
             }
         }
     }
@@ -284,6 +248,9 @@ export function CheckCommandOutputToolView({
     const hasMoreLines = formattedOutput.length > 10;
     const previewLines = formattedOutput.slice(0, 10);
     const linesToShow = showFullOutput ? formattedOutput : previewLines;
+    
+    // Add empty lines for natural scrolling
+    const emptyLines = Array.from({ length: 30 }, () => '');
 
     const isSessionRunning = status?.includes('still running') || status?.includes('running');
 
@@ -292,7 +259,7 @@ export function CheckCommandOutputToolView({
             <CardHeader className="h-14 bg-zinc-50/80 dark:bg-zinc-900/80 backdrop-blur-sm border-b p-2 px-4 space-y-2">
                 <div className="flex flex-row items-center justify-between">
                     <div className="flex items-center gap-2">
-                        <div className="relative p-2 rounded-lg bg-gradient-to-br from-blue-500/20 to-blue-600/10 border border-blue-500/20">
+                        <div className="relative p-2 rounded-xl bg-gradient-to-br from-blue-500/20 to-blue-600/10 border border-blue-500/20">
                             <Terminal className="w-5 h-5 text-blue-500 dark:text-blue-400" />
                         </div>
                         <div>
@@ -334,46 +301,45 @@ export function CheckCommandOutputToolView({
                     />
                 ) : sessionName ? (
                     <ScrollArea className="h-full w-full">
-                        <div className="p-4">
-                            <div className="mb-4">
-                                <div className="bg-zinc-100 dark:bg-neutral-900 rounded-lg overflow-hidden border border-zinc-200/20">
-                                    <div className="bg-zinc-300 dark:bg-neutral-800 flex items-center justify-between dark:border-zinc-700/50">
-                                        <div className="bg-zinc-200 w-full dark:bg-zinc-800 px-4 py-2 flex items-center gap-2">
+                        <div className="bg-zinc-100 dark:bg-neutral-900 overflow-hidden">
+                            <div className="bg-zinc-300 dark:bg-neutral-800 flex items-center justify-between dark:border-zinc-700/50">
+                                <div className="bg-zinc-200 w-full dark:bg-zinc-800 px-4 py-2 flex items-center gap-2">
                                             <TerminalIcon className="h-4 w-4 text-zinc-600 dark:text-zinc-400" />
                                             <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Terminal Session</span>
                                             <span className="text-xs text-zinc-500 dark:text-zinc-400">({sessionName})</span>
-                                        </div>
-
-                                    </div>
-                                    <div className="p-4 max-h-96 overflow-auto scrollbar-hide">
-                                        <pre className="text-xs text-zinc-600 dark:text-zinc-300 font-mono whitespace-pre-wrap break-all overflow-visible">
-                                            {linesToShow.map((line, index) => (
-                                                <div key={index} className="py-0.5 bg-transparent">
-                                                    {line}
-                                                </div>
-                                            ))}
-
-                                            {!showFullOutput && hasMoreLines && (
-                                                <div className="text-zinc-500 mt-2 border-t border-zinc-700/30 pt-2">
-                                                    + {formattedOutput.length - 10} more lines
-                                                </div>
-                                            )}
-                                        </pre>
-                                    </div>
                                 </div>
                             </div>
-
-
-
-                            {!output && !isStreaming && (
-                                <div className="bg-black rounded-lg overflow-hidden border border-zinc-700/20 shadow-md p-6 flex items-center justify-center">
-                                    <div className="text-center">
-                                        <CircleDashed className="h-8 w-8 text-zinc-500 mx-auto mb-2" />
-                                        <p className="text-zinc-400 text-sm">No output received</p>
+                            <div className="px-4 py-3 overflow-auto">
+                                <pre className="text-xs text-zinc-600 dark:text-zinc-300 font-mono whitespace-pre-wrap break-all overflow-visible">
+                                    {linesToShow.map((line, index) => (
+                                        <span key={index}>
+                                            {line}
+                                            {'\n'}
+                                        </span>
+                                    ))}
+                                    {/* Add empty lines for natural scrolling */}
+                                    {showFullOutput && emptyLines.map((_, idx) => (
+                                        <span key={`empty-${idx}`}>{'\n'}</span>
+                                    ))}
+                                </pre>
+                                {!showFullOutput && hasMoreLines && (
+                                    <div className="text-zinc-500 mt-2 border-t border-zinc-700/30 pt-2">
+                                        + {formattedOutput.length - 10} more lines
                                     </div>
-                                </div>
-                            )}
+                                )}
+                            </div>
                         </div>
+
+
+
+                        {!output && !isStreaming && (
+                            <div className="bg-black overflow-hidden p-12 flex items-center justify-center">
+                                <div className="text-center">
+                                    <CircleDashed className="h-8 w-8 text-zinc-500 mx-auto mb-2" />
+                                    <p className="text-zinc-400 text-sm">No output received</p>
+                                </div>
+                            </div>
+                        )}
                     </ScrollArea>
                 ) : (
                     <div className="flex flex-col items-center justify-center h-full py-12 px-6 bg-gradient-to-b from-white to-zinc-50 dark:from-zinc-950 dark:to-zinc-900">

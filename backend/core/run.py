@@ -6,28 +6,30 @@ from typing import Optional, Dict, List, Any, AsyncGenerator
 from dataclasses import dataclass
 
 from core.tools.message_tool import MessageTool
-from core.tools.sb_deploy_tool import SandboxDeployTool
 from core.tools.sb_expose_tool import SandboxExposeTool
 from core.tools.web_search_tool import SandboxWebSearchTool
+from core.tools.image_search_tool import SandboxImageSearchTool
 from dotenv import load_dotenv
-from core.utils.config import config
+from core.utils.config import config, EnvMode
 from core.prompts.agent_builder_prompt import get_agent_builder_prompt
 from core.agentpress.thread_manager import ThreadManager
 from core.agentpress.response_processor import ProcessorConfig
+from core.agentpress.error_processor import ErrorProcessor
 from core.tools.sb_shell_tool import SandboxShellTool
 from core.tools.sb_files_tool import SandboxFilesTool
+from core.tools.sb_kb_tool import SandboxKbTool
 from core.tools.data_providers_tool import DataProvidersTool
 from core.tools.expand_msg_tool import ExpandMessageTool
 from core.prompts.prompt import get_system_prompt
 
 from core.utils.logger import logger
-from core.utils.llm_cache_utils import format_message_with_cache
 
-from billing.billing_integration import billing_integration
+from core.billing.billing_integration import billing_integration
 from core.tools.sb_vision_tool import SandboxVisionTool
 from core.tools.sb_image_edit_tool import SandboxImageEditTool
-from core.tools.sb_presentation_outline_tool import SandboxPresentationOutlineTool
+from core.tools.sb_designer_tool import SandboxDesignerTool
 from core.tools.sb_presentation_tool import SandboxPresentationTool
+from core.tools.sb_document_parser import SandboxDocumentParserTool
 
 from core.services.langfuse import langfuse
 from langfuse.client import StatefulTraceClient
@@ -35,45 +37,42 @@ from langfuse.client import StatefulTraceClient
 from core.tools.mcp_tool_wrapper import MCPToolWrapper
 from core.tools.task_list_tool import TaskListTool
 from core.agentpress.tool import SchemaType
-from core.tools.sb_sheets_tool import SandboxSheetsTool
-# from core.tools.sb_web_dev_tool import SandboxWebDevTool  # DEACTIVATED
 from core.tools.sb_upload_file_tool import SandboxUploadFileTool
 from core.tools.sb_docs_tool import SandboxDocsTool
+from core.tools.people_search_tool import PeopleSearchTool
+from core.tools.company_search_tool import CompanySearchTool
+from core.tools.paper_search_tool import PaperSearchTool
+from core.ai_models.manager import model_manager
+from core.tools.vapi_voice_tool import VapiVoiceTool
 
 load_dotenv()
-
 
 @dataclass
 class AgentConfig:
     thread_id: str
     project_id: str
-    stream: bool
     native_max_auto_continues: int = 25
     max_iterations: int = 100
     model_name: str = "openai/gpt-5-mini"
-    enable_thinking: Optional[bool] = False
-    reasoning_effort: Optional[str] = 'low'
-    enable_context_manager: bool = True
     agent_config: Optional[dict] = None
     trace: Optional[StatefulTraceClient] = None
 
-
 class ToolManager:
-    def __init__(self, thread_manager: ThreadManager, project_id: str, thread_id: str):
+    def __init__(self, thread_manager: ThreadManager, project_id: str, thread_id: str, agent_config: Optional[dict] = None):
         self.thread_manager = thread_manager
         self.project_id = project_id
         self.thread_id = thread_id
+        self.agent_config = agent_config
+        self.account_id = agent_config.get('account_id') if agent_config else None
     
     def register_all_tools(self, agent_id: Optional[str] = None, disabled_tools: Optional[List[str]] = None):
-        """Register all available tools by default, with optional exclusions.
+        """Register all tools with manual control and proper initialization.
         
         Args:
             agent_id: Optional agent ID for agent builder tools
             disabled_tools: List of tool names to exclude from registration
         """
         disabled_tools = disabled_tools or []
-        
-        logger.debug(f"Registering tools with disabled list: {disabled_tools}")
         
         # Core tools - always enabled
         self._register_core_tools()
@@ -91,7 +90,11 @@ class ToolManager:
         # Browser tool
         self._register_browser_tool(disabled_tools)
         
-        logger.debug(f"Tool registration complete. Registered tools: {list(self.thread_manager.tool_registry.tools.keys())}")
+        # Suna-specific tools (agent creation)
+        if self.account_id:
+            self._register_suna_specific_tools(disabled_tools)
+        
+        logger.info(f"Tool registration complete. Registered {len(self.thread_manager.tool_registry.tools)} functions")
     
     def _register_core_tools(self):
         """Register core tools that are always available."""
@@ -100,41 +103,83 @@ class ToolManager:
         self.thread_manager.add_tool(TaskListTool, project_id=self.project_id, thread_manager=self.thread_manager, thread_id=self.thread_id)
     
     def _register_sandbox_tools(self, disabled_tools: List[str]):
-        """Register sandbox-related tools."""
+        """Register sandbox-related tools with granular control."""
+        # Register web search tools conditionally based on API keys
+        if config.TAVILY_API_KEY or config.FIRECRAWL_API_KEY:
+            if 'web_search_tool' not in disabled_tools:
+                enabled_methods = self._get_enabled_methods_for_tool('web_search_tool')
+                self.thread_manager.add_tool(SandboxWebSearchTool, function_names=enabled_methods, thread_manager=self.thread_manager, project_id=self.project_id)
+                if enabled_methods:
+                    logger.debug(f"✅ Registered web_search_tool with methods: {enabled_methods}")
+        
+        if config.SERPER_API_KEY:
+            if 'image_search_tool' not in disabled_tools:
+                enabled_methods = self._get_enabled_methods_for_tool('image_search_tool')
+                self.thread_manager.add_tool(SandboxImageSearchTool, function_names=enabled_methods, thread_manager=self.thread_manager, project_id=self.project_id)
+                if enabled_methods:
+                    logger.debug(f"✅ Registered image_search_tool with methods: {enabled_methods}")
+        
+        # Register other sandbox tools
         sandbox_tools = [
             ('sb_shell_tool', SandboxShellTool, {'project_id': self.project_id, 'thread_manager': self.thread_manager}),
             ('sb_files_tool', SandboxFilesTool, {'project_id': self.project_id, 'thread_manager': self.thread_manager}),
-            ('sb_deploy_tool', SandboxDeployTool, {'project_id': self.project_id, 'thread_manager': self.thread_manager}),
             ('sb_expose_tool', SandboxExposeTool, {'project_id': self.project_id, 'thread_manager': self.thread_manager}),
-            ('web_search_tool', SandboxWebSearchTool, {'project_id': self.project_id, 'thread_manager': self.thread_manager}),
             ('sb_vision_tool', SandboxVisionTool, {'project_id': self.project_id, 'thread_id': self.thread_id, 'thread_manager': self.thread_manager}),
             ('sb_image_edit_tool', SandboxImageEditTool, {'project_id': self.project_id, 'thread_id': self.thread_id, 'thread_manager': self.thread_manager}),
-            ('sb_presentation_outline_tool', SandboxPresentationOutlineTool, {'project_id': self.project_id, 'thread_manager': self.thread_manager}),
+            ('sb_kb_tool', SandboxKbTool, {'project_id': self.project_id, 'thread_manager': self.thread_manager}),
+            ('sb_design_tool', SandboxDesignerTool, {'project_id': self.project_id, 'thread_id': self.thread_id, 'thread_manager': self.thread_manager}),
             ('sb_presentation_tool', SandboxPresentationTool, {'project_id': self.project_id, 'thread_manager': self.thread_manager}),
-
-            ('sb_sheets_tool', SandboxSheetsTool, {'project_id': self.project_id, 'thread_manager': self.thread_manager}),
-            # ('sb_web_dev_tool', SandboxWebDevTool, {'project_id': self.project_id, 'thread_id': self.thread_id, 'thread_manager': self.thread_manager}),  # DEACTIVATED
             ('sb_upload_file_tool', SandboxUploadFileTool, {'project_id': self.project_id, 'thread_manager': self.thread_manager}),
             ('sb_docs_tool', SandboxDocsTool, {'project_id': self.project_id, 'thread_manager': self.thread_manager}),
         ]
         
         for tool_name, tool_class, kwargs in sandbox_tools:
             if tool_name not in disabled_tools:
-                self.thread_manager.add_tool(tool_class, **kwargs)
-                logger.debug(f"Registered {tool_name}")
+                enabled_methods = self._get_enabled_methods_for_tool(tool_name)
+                self.thread_manager.add_tool(tool_class, function_names=enabled_methods, **kwargs)
+                if enabled_methods:
+                    logger.debug(f"✅ Registered {tool_name} with methods: {enabled_methods}")
     
     def _register_utility_tools(self, disabled_tools: List[str]):
-        """Register utility and data provider tools."""
+        """Register utility tools with API key checks."""
         if config.RAPID_API_KEY and 'data_providers_tool' not in disabled_tools:
-            self.thread_manager.add_tool(DataProvidersTool)
-            logger.debug("Registered data_providers_tool")
-    
+            enabled_methods = self._get_enabled_methods_for_tool('data_providers_tool')
+            self.thread_manager.add_tool(DataProvidersTool, function_names=enabled_methods)
+            if enabled_methods:
+                logger.debug(f"✅ Registered data_providers_tool with methods: {enabled_methods}")
+        
+        if config.SEMANTIC_SCHOLAR_API_KEY and 'paper_search_tool' not in disabled_tools:
+            if 'paper_search_tool' not in disabled_tools:
+                enabled_methods = self._get_enabled_methods_for_tool('paper_search_tool')
+                self.thread_manager.add_tool(PaperSearchTool, function_names=enabled_methods, thread_manager=self.thread_manager)
+                if enabled_methods:
+                    logger.debug(f"✅ Registered paper_search_tool with methods: {enabled_methods}")
+        
+        # Register search tools if EXA API key is available
+        if config.EXA_API_KEY:
+            if 'people_search_tool' not in disabled_tools:
+                enabled_methods = self._get_enabled_methods_for_tool('people_search_tool')
+                self.thread_manager.add_tool(PeopleSearchTool, function_names=enabled_methods, thread_manager=self.thread_manager)
+                if enabled_methods:
+                    logger.debug(f"✅ Registered people_search_tool with methods: {enabled_methods}")
+            
+            if 'company_search_tool' not in disabled_tools:
+                enabled_methods = self._get_enabled_methods_for_tool('company_search_tool')
+                self.thread_manager.add_tool(CompanySearchTool, function_names=enabled_methods, thread_manager=self.thread_manager)
+                if enabled_methods:
+                    logger.debug(f"✅ Registered company_search_tool with methods: {enabled_methods}")
+        
+        if config.ENV_MODE != EnvMode.PRODUCTION and config.VAPI_PRIVATE_KEY and 'vapi_voice_tool' not in disabled_tools:
+            enabled_methods = self._get_enabled_methods_for_tool('vapi_voice_tool')
+            self.thread_manager.add_tool(VapiVoiceTool, function_names=enabled_methods, thread_manager=self.thread_manager)
+            if enabled_methods:
+                logger.debug(f"✅ Registered vapi_voice_tool with methods: {enabled_methods}")
+            
     def _register_agent_builder_tools(self, agent_id: str, disabled_tools: List[str]):
-        """Register agent builder tools."""
+        """Register agent builder tools with proper initialization."""
         from core.tools.agent_builder_tools.agent_config_tool import AgentConfigTool
         from core.tools.agent_builder_tools.mcp_search_tool import MCPSearchTool
         from core.tools.agent_builder_tools.credential_profile_tool import CredentialProfileTool
-        from core.tools.agent_builder_tools.workflow_tool import WorkflowTool
         from core.tools.agent_builder_tools.trigger_tool import TriggerTool
         from core.services.supabase import DBConnection
         
@@ -144,44 +189,74 @@ class ToolManager:
             ('agent_config_tool', AgentConfigTool),
             ('mcp_search_tool', MCPSearchTool),
             ('credential_profile_tool', CredentialProfileTool),
-            ('workflow_tool', WorkflowTool),
             ('trigger_tool', TriggerTool),
         ]
-        
-        logger.debug(f"Registering agent builder tools for agent_id: {agent_id}")
-        logger.debug(f"Disabled tools list: {disabled_tools}")
-        
+
         for tool_name, tool_class in agent_builder_tools:
             if tool_name not in disabled_tools:
                 try:
-                    self.thread_manager.add_tool(tool_class, thread_manager=self.thread_manager, db_connection=db, agent_id=agent_id)
-                    logger.debug(f"✅ Registered {tool_name}")
+                    enabled_methods = self._get_enabled_methods_for_tool(tool_name)
+                    self.thread_manager.add_tool(
+                        tool_class, 
+                        function_names=enabled_methods, 
+                        thread_manager=self.thread_manager, 
+                        db_connection=db, 
+                        agent_id=agent_id
+                    )
+                    if enabled_methods:
+                        logger.debug(f"✅ Registered {tool_name} with methods: {enabled_methods}")
                 except Exception as e:
                     logger.warning(f"❌ Failed to register {tool_name}: {e}")
-            else:
-                logger.debug(f"⏭️ Skipping {tool_name} - disabled")
     
     def _register_suna_specific_tools(self, disabled_tools: List[str]):
-        """Register tools specific to Suna (the default agent)."""
-        if 'agent_creation_tool' not in disabled_tools:
+        """Register Suna-specific tools like agent creation."""
+        if 'agent_creation_tool' not in disabled_tools and self.account_id:
             from core.tools.agent_creation_tool import AgentCreationTool
             from core.services.supabase import DBConnection
             
             db = DBConnection()
-            
-            if hasattr(self, 'account_id') and self.account_id:
-                self.thread_manager.add_tool(AgentCreationTool, thread_manager=self.thread_manager, db_connection=db, account_id=self.account_id)
-                logger.debug("Registered agent_creation_tool for Suna")
-            else:
-                logger.warning("Could not register agent_creation_tool: account_id not available")
+            enabled_methods = self._get_enabled_methods_for_tool('agent_creation_tool')
+            self.thread_manager.add_tool(
+                AgentCreationTool, 
+                function_names=enabled_methods, 
+                thread_manager=self.thread_manager, 
+                db_connection=db, 
+                account_id=self.account_id
+            )
+            if enabled_methods:
+                logger.debug(f"✅ Registered agent_creation_tool with methods: {enabled_methods}")
     
     def _register_browser_tool(self, disabled_tools: List[str]):
-        """Register browser tool."""
+        """Register browser tool with sandbox access."""
         if 'browser_tool' not in disabled_tools:
             from core.tools.browser_tool import BrowserTool
-            self.thread_manager.add_tool(BrowserTool, project_id=self.project_id, thread_id=self.thread_id, thread_manager=self.thread_manager)
-            logger.debug("Registered browser_tool")
+            
+            enabled_methods = self._get_enabled_methods_for_tool('browser_tool')
+            self.thread_manager.add_tool(
+                BrowserTool, 
+                function_names=enabled_methods, 
+                project_id=self.project_id, 
+                thread_id=self.thread_id, 
+                thread_manager=self.thread_manager
+            )
+            if enabled_methods:
+                logger.debug(f"✅ Registered browser_tool with methods: {enabled_methods}")
     
+    def _get_enabled_methods_for_tool(self, tool_name: str) -> Optional[List[str]]:
+        if not self.agent_config or 'agentpress_tools' not in self.agent_config:
+            return None
+        
+        from core.utils.tool_discovery import get_enabled_methods_for_tool
+        from core.utils.tool_migration import migrate_legacy_tool_config
+        
+        raw_tools = self.agent_config['agentpress_tools']
+        
+        if not isinstance(raw_tools, dict):
+            return None
+        
+        migrated_tools = migrate_legacy_tool_config(raw_tools)
+        
+        return get_enabled_methods_for_tool(tool_name, migrated_tools)
 
 class MCPManager:
     def __init__(self, thread_manager: ThreadManager, account_id: str):
@@ -198,27 +273,7 @@ class MCPManager:
             for custom_mcp in agent_config['custom_mcps']:
                 custom_type = custom_mcp.get('customType', custom_mcp.get('type', 'sse'))
                 
-                if custom_type == 'pipedream':
-                    if 'config' not in custom_mcp:
-                        custom_mcp['config'] = {}
-                    
-                    if not custom_mcp['config'].get('external_user_id'):
-                        profile_id = custom_mcp['config'].get('profile_id')
-                        if profile_id:
-                            try:
-                                from pipedream import profile_service
-                                from uuid import UUID
-                                
-                                profile = await profile_service.get_profile(UUID(self.account_id), UUID(profile_id))
-                                if profile:
-                                    custom_mcp['config']['external_user_id'] = profile.external_user_id
-                            except Exception as e:
-                                logger.error(f"Error retrieving external_user_id from profile {profile_id}: {e}")
-                    
-                    if 'headers' in custom_mcp['config'] and 'x-pd-app-slug' in custom_mcp['config']['headers']:
-                        custom_mcp['config']['app_slug'] = custom_mcp['config']['headers']['x-pd-app-slug']
-                
-                elif custom_type == 'composio':
+                if custom_type == 'composio':
                     qualified_name = custom_mcp.get('qualifiedName')
                     if not qualified_name:
                         qualified_name = f"composio.{custom_mcp['name'].replace(' ', '_').lower()}"
@@ -261,7 +316,7 @@ class MCPManager:
                         "schema": schema
                     }
             
-            logger.debug(f"⚡ Registered {len(updated_schemas)} MCP tools (Redis cache enabled)")
+            logger.info(f"⚡ Registered {len(updated_schemas)} MCP tools (Redis cache enabled)")
             return mcp_wrapper_instance
         except Exception as e:
             logger.error(f"Failed to initialize MCP tools: {e}")
@@ -273,15 +328,17 @@ class PromptManager:
     async def build_system_prompt(model_name: str, agent_config: Optional[dict], 
                                   thread_id: str, 
                                   mcp_wrapper_instance: Optional[MCPToolWrapper],
-                                  client=None) -> dict:
+                                  client=None,
+                                  tool_registry=None,
+                                  xml_tool_calling: bool = True) -> dict:
         
         default_system_content = get_system_prompt()
         
-        if "anthropic" not in model_name.lower():
-            sample_response_path = os.path.join(os.path.dirname(__file__), 'prompts/samples/1.txt')
-            with open(sample_response_path, 'r') as file:
-                sample_response = file.read()
-            default_system_content = default_system_content + "\n\n <sample_assistant_response>" + sample_response + "</sample_assistant_response>"
+        # if "anthropic" not in model_name.lower():
+        #     sample_response_path = os.path.join(os.path.dirname(__file__), 'prompts/samples/1.txt')
+        #     with open(sample_response_path, 'r') as file:
+        #         sample_response = file.read()
+        #     default_system_content = default_system_content + "\n\n <sample_assistant_response>" + sample_response + "</sample_assistant_response>"
         
         # Start with agent's normal system prompt or default
         if agent_config and agent_config.get('system_prompt'):
@@ -294,7 +351,7 @@ class PromptManager:
             agentpress_tools = agent_config.get('agentpress_tools', {})
             has_builder_tools = any(
                 agentpress_tools.get(tool, False) 
-                for tool in ['agent_config_tool', 'mcp_search_tool', 'credential_profile_tool', 'workflow_tool', 'trigger_tool']
+                for tool in ['agent_config_tool', 'mcp_search_tool', 'credential_profile_tool', 'trigger_tool']
             )
             
             if has_builder_tools:
@@ -380,6 +437,45 @@ class PromptManager:
             mcp_info += "NEVER supplement MCP results with your training data or make assumptions beyond what the tools provide.\n"
             
             system_content += mcp_info
+        
+        # Add XML tool calling instructions to system prompt if requested
+        if xml_tool_calling and tool_registry:
+            openapi_schemas = tool_registry.get_openapi_schemas()
+            
+            if openapi_schemas:
+                # Convert schemas to JSON string
+                schemas_json = json.dumps(openapi_schemas, indent=2)
+                
+                examples_content = f"""
+
+In this environment you have access to a set of tools you can use to answer the user's question.
+
+You can invoke functions by writing a <function_calls> block like the following as part of your reply to the user:
+
+<function_calls>
+<invoke name="function_name">
+<parameter name="param_name">param_value</parameter>
+...
+</invoke>
+</function_calls>
+
+String and scalar parameters should be specified as-is, while lists and objects should use JSON format.
+
+Here are the functions available in JSON Schema format:
+
+```json
+{schemas_json}
+```
+
+When using the tools:
+- Use the exact function names from the JSON schema above
+- Include all required parameters as specified in the schema
+- Format complex data (objects, arrays) as JSON strings within the parameter tags
+- Boolean values should be "true" or "false" (lowercase)
+"""
+                
+                system_content += examples_content
+                logger.debug("Appended XML tool examples to system prompt")
 
         now = datetime.datetime.now(datetime.timezone.utc)
         datetime_info = f"\n\n=== CURRENT DATE/TIME INFORMATION ===\n"
@@ -392,49 +488,8 @@ class PromptManager:
         system_content += datetime_info
 
         system_message = {"role": "system", "content": system_content}
-        return format_message_with_cache(system_message, model_name)
+        return system_message
 
-
-class MessageManager:
-    def __init__(self, client, thread_id: str, model_name: str, trace: Optional[StatefulTraceClient], 
-                 agent_config: Optional[dict] = None, enable_context_manager: bool = False):
-        self.client = client
-        self.thread_id = thread_id
-        self.model_name = model_name
-        self.trace = trace
-        self.agent_config = agent_config
-        self.enable_context_manager = enable_context_manager
-    
-    async def build_temporary_message(self) -> Optional[dict]:
-        system_message = None
-        
-        if self.agent_config and 'system_prompt' in self.agent_config:
-            system_prompt = self.agent_config['system_prompt']
-            if system_prompt:
-                system_message = system_prompt
-        
-        if self.agent_config:
-            agentpress_tools = self.agent_config.get('agentpress_tools', {})
-            has_builder_tools = any(
-                agentpress_tools.get(tool, False) 
-                for tool in ['agent_config_tool', 'mcp_search_tool', 'credential_profile_tool', 'workflow_tool', 'trigger_tool']
-            )
-            
-            if has_builder_tools:
-                from core.prompts.agent_builder_prompt import AGENT_BUILDER_SYSTEM_PROMPT
-                if system_message:
-                    system_message += f"\n\n{AGENT_BUILDER_SYSTEM_PROMPT}"
-                else:
-                    system_message = AGENT_BUILDER_SYSTEM_PROMPT
-        
-        if system_message:
-            return {
-                "temporary": True,
-                "role": "system",
-                "content": system_message
-            }
-        
-        return None
 
 
 class AgentRunner:
@@ -472,7 +527,7 @@ class AgentRunner:
             logger.debug(f"No sandbox found for project {self.config.project_id}; will create lazily when needed")
     
     async def setup_tools(self):
-        tool_manager = ToolManager(self.thread_manager, self.config.project_id, self.config.thread_id)
+        tool_manager = ToolManager(self.thread_manager, self.config.project_id, self.config.thread_id, self.config.agent_config)
         
         agent_id = None
         if self.config.agent_config:
@@ -491,6 +546,22 @@ class AgentRunner:
         else:
             logger.debug("Not a Suna agent, skipping Suna-specific tool registration")
     
+    def _get_enabled_methods_for_tool(self, tool_name: str) -> Optional[List[str]]:
+        if not self.config.agent_config or 'agentpress_tools' not in self.config.agent_config:
+            return None
+        
+        from core.utils.tool_discovery import get_enabled_methods_for_tool
+        from core.utils.tool_migration import migrate_legacy_tool_config
+        
+        raw_tools = self.config.agent_config['agentpress_tools']
+        
+        if not isinstance(raw_tools, dict):
+            return None
+        
+        migrated_tools = migrate_legacy_tool_config(raw_tools)
+        
+        return get_enabled_methods_for_tool(tool_name, migrated_tools)
+    
     def _register_suna_specific_tools(self, disabled_tools: List[str]):
         if 'agent_creation_tool' not in disabled_tools:
             from core.tools.agent_creation_tool import AgentCreationTool
@@ -499,8 +570,16 @@ class AgentRunner:
             db = DBConnection()
             
             if hasattr(self, 'account_id') and self.account_id:
-                self.thread_manager.add_tool(AgentCreationTool, thread_manager=self.thread_manager, db_connection=db, account_id=self.account_id)
-                logger.debug("Registered agent_creation_tool for Suna")
+                # Check for granular method control
+                enabled_methods = self._get_enabled_methods_for_tool('agent_creation_tool')
+                if enabled_methods is not None:
+                    # Register only enabled methods
+                    self.thread_manager.add_tool(AgentCreationTool, function_names=enabled_methods, thread_manager=self.thread_manager, db_connection=db, account_id=self.account_id)
+                    logger.debug(f"Registered agent_creation_tool for Suna with methods: {enabled_methods}")
+                else:
+                    # Register all methods (backward compatibility)
+                    self.thread_manager.add_tool(AgentCreationTool, thread_manager=self.thread_manager, db_connection=db, account_id=self.account_id)
+                    logger.debug("Registered agent_creation_tool for Suna (all methods)")
             else:
                 logger.warning("Could not register agent_creation_tool: account_id not available")
     
@@ -531,20 +610,19 @@ class AgentRunner:
                 return True
         
         all_tools = [
-            'sb_shell_tool', 'sb_files_tool', 'sb_deploy_tool', 'sb_expose_tool',
-            'web_search_tool', 'sb_vision_tool', 'sb_presentation_tool', 'sb_image_edit_tool',
-            'sb_sheets_tool', 'sb_web_dev_tool', 'data_providers_tool', 'browser_tool',
-            'agent_config_tool', 'mcp_search_tool', 'credential_profile_tool', 
-            'workflow_tool', 'trigger_tool'
+            'sb_shell_tool', 'sb_files_tool', 'sb_expose_tool',
+            'web_search_tool', 'image_search_tool', 'sb_vision_tool', 'sb_presentation_tool', 'sb_image_edit_tool',
+            'sb_kb_tool', 'sb_design_tool', 'sb_upload_file_tool',
+            'sb_docs_tool',
+            'data_providers_tool', 'browser_tool', 'people_search_tool', 'company_search_tool', 
+            'agent_config_tool', 'mcp_search_tool', 'credential_profile_tool', 'trigger_tool',
+            'agent_creation_tool'
         ]
         
         for tool_name in all_tools:
             if not is_tool_enabled(tool_name):
                 disabled_tools.append(tool_name)
-        
-        if 'sb_presentation_tool' in disabled_tools:
-            disabled_tools.extend(['sb_presentation_outline_tool'])
-        
+                
         logger.debug(f"Disabled tools from config: {disabled_tools}")
         return disabled_tools
     
@@ -555,18 +633,6 @@ class AgentRunner:
         mcp_manager = MCPManager(self.thread_manager, self.account_id)
         return await mcp_manager.register_mcp_tools(self.config.agent_config)
     
-    def get_max_tokens(self) -> Optional[int]:
-        logger.debug(f"get_max_tokens called with: '{self.config.model_name}' (type: {type(self.config.model_name)})")
-        if "sonnet" in self.config.model_name.lower():
-            return 8192
-        elif "gpt-4" in self.config.model_name.lower():
-            return 4096
-        elif "gemini-2.5-pro" in self.config.model_name.lower():
-            return 64000
-        elif "kimi-k2" in self.config.model_name.lower():
-            return 8192
-        return None
-    
     async def run(self) -> AsyncGenerator[Dict[str, Any], None]:
         await self.setup()
         await self.setup_tools()
@@ -575,7 +641,9 @@ class AgentRunner:
         system_message = await PromptManager.build_system_prompt(
             self.config.model_name, self.config.agent_config, 
             self.config.thread_id, 
-            mcp_wrapper_instance, self.client
+            mcp_wrapper_instance, self.client,
+            tool_registry=self.thread_manager.tool_registry,
+            xml_tool_calling=True
         )
         logger.info(f"📝 System message built once: {len(str(system_message.get('content', '')))} chars")
         logger.debug(f"model_name received: {self.config.model_name}")
@@ -583,15 +651,15 @@ class AgentRunner:
         continue_execution = True
 
         latest_user_message = await self.client.table('messages').select('*').eq('thread_id', self.config.thread_id).eq('type', 'user').order('created_at', desc=True).limit(1).execute()
+        latest_user_message_content = None
         if latest_user_message.data and len(latest_user_message.data) > 0:
             data = latest_user_message.data[0]['content']
             if isinstance(data, str):
                 data = json.loads(data)
             if self.config.trace:
                 self.config.trace.update(input=data['content'])
-
-        message_manager = MessageManager(self.client, self.config.thread_id, self.config.model_name, self.config.trace, 
-                                         agent_config=self.config.agent_config, enable_context_manager=self.config.enable_context_manager)
+            # Extract content for fast path optimization
+            latest_user_message_content = data.get('content') if isinstance(data, dict) else str(data)
 
         while continue_execution and iteration_count < self.config.max_iterations:
             iteration_count += 1
@@ -614,75 +682,23 @@ class AgentRunner:
                     break
 
             temporary_message = None
-            max_tokens = self.get_max_tokens()
-            logger.debug(f"max_tokens: {max_tokens}")
+            # Don't set max_tokens by default - let LiteLLM and providers handle their own defaults
+            max_tokens = None
+            logger.debug(f"max_tokens: {max_tokens} (using provider defaults)")
             generation = self.config.trace.generation(name="thread_manager.run_thread") if self.config.trace else None
             try:
-                cache_metrics = None
-                from core.utils.llm_cache_utils import is_cache_supported, needs_cache_probe
-                
-                if self.config.stream and needs_cache_probe(self.config.model_name):
-                    logger.info(f"🔍 Making cache probe for {self.config.model_name} (doesn't send cache metrics in streaming)...")
-                    
-                    try:
-                        from core.services.llm import make_llm_api_call
-                        existing_messages = await self.thread_manager.get_llm_messages(self.config.thread_id)
-                        if existing_messages and len(existing_messages) > 0:
-                            probe_messages = [system_message] + existing_messages[-4:]  # Last 4 messages
-                        else:
-                            probe_messages = [system_message]
-                        
-                        probe_messages.append({
-                            "role": "user", 
-                            "content": "."
-                        })
-                        
-                        probe_response = await make_llm_api_call(
-                            messages=probe_messages,
-                            model_name=self.config.model_name,
-                            temperature=0,
-                            max_tokens=1,
-                            stream=False
-                        )
-                        
-                        if hasattr(probe_response, 'usage'):
-                            usage = probe_response.usage
-                            cache_creation = getattr(usage, 'cache_creation_input_tokens', 0)
-                            cache_read = getattr(usage, 'cache_read_input_tokens', 0)
-                            total_prompt = getattr(usage, 'prompt_tokens', 0)
-                            
-                            if cache_read > 0 or cache_creation > 0:
-                                cache_percentage = (cache_read / total_prompt * 100) if total_prompt > 0 else 0
-                                logger.info(f"✅ CACHE PROBE: {cache_read}/{total_prompt} tokens cached ({cache_percentage:.1f}%), {cache_creation} created")
-                                
-                                cache_metrics = {
-                                    'cache_read_tokens': cache_read,
-                                    'cache_creation_tokens': cache_creation,
-                                    'cache_percentage': cache_percentage,
-                                    'total_prompt_tokens': total_prompt
-                                }
-                            else:
-                                logger.info(f"📊 CACHE PROBE: No cache activity (total prompt: {total_prompt} tokens)")
-                                cache_metrics = {
-                                    'cache_read_tokens': 0,
-                                    'cache_creation_tokens': 0,
-                                    'cache_percentage': 0,
-                                    'total_prompt_tokens': total_prompt
-                                }
-                    
-                    except Exception as e:
-                        logger.warning(f"Cache probe failed (continuing with streaming): {e}")
-                
+                logger.debug(f"Starting thread execution for {self.config.thread_id}")
                 response = await self.thread_manager.run_thread(
                     thread_id=self.config.thread_id,
                     system_prompt=system_message,
-                    stream=self.config.stream,
+                    stream=True, 
                     llm_model=self.config.model_name,
                     llm_temperature=0,
                     llm_max_tokens=max_tokens,
                     tool_choice="auto",
                     max_xml_tool_calls=1,
                     temporary_message=temporary_message,
+                    latest_user_message_content=latest_user_message_content,
                     processor_config=ProcessorConfig(
                         xml_tool_calling=True,
                         native_tool_calling=False,
@@ -692,43 +708,43 @@ class AgentRunner:
                         xml_adding_strategy="user_message"
                     ),
                     native_max_auto_continues=self.config.native_max_auto_continues,
-                    include_xml_examples=True,
-                    enable_thinking=self.config.enable_thinking,
-                    reasoning_effort=self.config.reasoning_effort,
-                    enable_context_manager=self.config.enable_context_manager,
-                    generation=generation,
-                    cache_metrics=cache_metrics
+                    generation=generation
                 )
-
-                if isinstance(response, dict) and "status" in response and response["status"] == "error":
-                    yield response
-                    break
 
                 last_tool_call = None
                 agent_should_terminate = False
                 error_detected = False
-                full_response = ""
 
                 try:
                     if hasattr(response, '__aiter__') and not isinstance(response, dict):
                         async for chunk in response:
+                            # Check for error status from thread_manager
                             if isinstance(chunk, dict) and chunk.get('type') == 'status' and chunk.get('status') == 'error':
+                                logger.error(f"Error in thread execution: {chunk.get('message', 'Unknown error')}")
                                 error_detected = True
                                 yield chunk
                                 continue
-                            
-                            if chunk.get('type') == 'status':
+
+                            # Check for error status in the stream (message format)
+                            if isinstance(chunk, dict) and chunk.get('type') == 'status':
                                 try:
+                                    content = chunk.get('content', {})
+                                    if isinstance(content, str):
+                                        content = json.loads(content)
+                                    
+                                    # Check for error status
+                                    if content.get('status_type') == 'error':
+                                        error_detected = True
+                                        yield chunk
+                                        continue
+                                    
+                                    # Check for agent termination
                                     metadata = chunk.get('metadata', {})
                                     if isinstance(metadata, str):
                                         metadata = json.loads(metadata)
                                     
                                     if metadata.get('agent_should_terminate'):
                                         agent_should_terminate = True
-                                        
-                                        content = chunk.get('content', {})
-                                        if isinstance(content, str):
-                                            content = json.loads(content)
                                         
                                         if content.get('function_name'):
                                             last_tool_call = content['function_name']
@@ -738,6 +754,7 @@ class AgentRunner:
                                 except Exception:
                                     pass
                             
+                            # Check for terminating XML tools in assistant content
                             if chunk.get('type') == 'assistant' and 'content' in chunk:
                                 try:
                                     content = chunk.get('content', '{}')
@@ -747,98 +764,91 @@ class AgentRunner:
                                         assistant_content_json = content
 
                                     assistant_text = assistant_content_json.get('content', '')
-                                    full_response += assistant_text
                                     if isinstance(assistant_text, str):
-                                        if '</ask>' in assistant_text or '</complete>' in assistant_text or '</web-browser-takeover>' in assistant_text:
-                                           if '</ask>' in assistant_text:
-                                               xml_tool = 'ask'
-                                           elif '</complete>' in assistant_text:
-                                               xml_tool = 'complete'
-                                           elif '</web-browser-takeover>' in assistant_text:
-                                               xml_tool = 'web-browser-takeover'
-
-                                           last_tool_call = xml_tool
+                                        if '</ask>' in assistant_text:
+                                            last_tool_call = 'ask'
+                                        elif '</complete>' in assistant_text:
+                                            last_tool_call = 'complete'
                                 
-                                except json.JSONDecodeError:
-                                    pass
-                                except Exception:
+                                except (json.JSONDecodeError, Exception):
                                     pass
 
                             yield chunk
                     else:
-                        error_detected = True
+                        # Non-streaming response or error dict
+                        # logger.debug(f"Response is not async iterable: {type(response)}")
+                        
+                        # Check if it's an error dict
+                        if isinstance(response, dict) and response.get('type') == 'status' and response.get('status') == 'error':
+                            logger.error(f"Thread returned error: {response.get('message', 'Unknown error')}")
+                            error_detected = True
+                            yield response
+                        else:
+                            logger.warning(f"Unexpected response type: {type(response)}")
+                            error_detected = True
 
                     if error_detected:
                         if generation:
-                            generation.end(output=full_response, status_message="error_detected", level="ERROR")
+                            generation.end(status_message="error_detected", level="ERROR")
                         break
                         
-                    if agent_should_terminate or last_tool_call in ['ask', 'complete', 'web-browser-takeover', 'present_presentation']:
+                    if agent_should_terminate or last_tool_call in ['ask', 'complete', 'present_presentation']:
                         if generation:
-                            generation.end(output=full_response, status_message="agent_stopped")
+                            generation.end(status_message="agent_stopped")
                         continue_execution = False
 
                 except Exception as e:
-                    error_msg = f"Error during response streaming: {str(e)}"
+                    # Use ErrorProcessor for safe error handling
+                    processed_error = ErrorProcessor.process_system_error(e, context={"thread_id": self.config.thread_id})
+                    ErrorProcessor.log_error(processed_error)
                     if generation:
-                        generation.end(output=full_response, status_message=error_msg, level="ERROR")
-                    yield {
-                        "type": "status",
-                        "status": "error",
-                        "message": error_msg
-                    }
+                        generation.end(status_message=processed_error.message, level="ERROR")
+                    yield processed_error.to_stream_dict()
                     break
                     
             except Exception as e:
-                error_msg = f"Error running thread: {str(e)}"
-                yield {
-                    "type": "status",
-                    "status": "error",
-                    "message": error_msg
-                }
+                # Use ErrorProcessor for safe error conversion
+                processed_error = ErrorProcessor.process_system_error(e, context={"thread_id": self.config.thread_id})
+                ErrorProcessor.log_error(processed_error)
+                yield processed_error.to_stream_dict()
                 break
             
             if generation:
-                generation.end(output=full_response)
+                generation.end()
 
-        asyncio.create_task(asyncio.to_thread(lambda: langfuse.flush()))
+        try:
+            asyncio.create_task(asyncio.to_thread(lambda: langfuse.flush()))
+        except Exception as e:
+            logger.warning(f"Failed to flush Langfuse: {e}")
 
 
 async def run_agent(
     thread_id: str,
     project_id: str,
-    stream: bool,
     thread_manager: Optional[ThreadManager] = None,
     native_max_auto_continues: int = 25,
     max_iterations: int = 100,
     model_name: str = "openai/gpt-5-mini",
-    enable_thinking: Optional[bool] = False,
-    reasoning_effort: Optional[str] = 'low',
-    enable_context_manager: bool = True,
     agent_config: Optional[dict] = None,    
     trace: Optional[StatefulTraceClient] = None
 ):
     effective_model = model_name
-    is_tier_default = model_name in ["Kimi K2", "Claude Sonnet 4", "openai/gpt-5-mini"]
-    
-    if is_tier_default and agent_config and agent_config.get('model'):
-        effective_model = agent_config['model']
-        logger.debug(f"Using model from agent config: {effective_model} (tier default was {model_name})")
-    elif not is_tier_default:
-        logger.debug(f"Using user-selected model: {effective_model}")
-    else:
-        logger.debug(f"Using tier default model: {effective_model}")
+
+    # is_tier_default = model_name in ["Kimi K2", "Claude Sonnet 4", "openai/gpt-5-mini"]
+    # if is_tier_default and agent_config and agent_config.get('model'):
+    #     effective_model = agent_config['model']
+    #     logger.debug(f"Using model from agent config: {effective_model} (tier default was {model_name})")
+    # elif not is_tier_default:
+    #     logger.debug(f"Using user-selected model: {effective_model}")
+    # else:
+    #     logger.debug(f"Using tier default model: {effective_model}")
     
     config = AgentConfig(
         thread_id=thread_id,
         project_id=project_id,
-        stream=stream,
         native_max_auto_continues=native_max_auto_continues,
         max_iterations=max_iterations,
         model_name=effective_model,
-        enable_thinking=enable_thinking,
-        reasoning_effort=reasoning_effort,
-        enable_context_manager=enable_context_manager,
         agent_config=agent_config,
         trace=trace
     )

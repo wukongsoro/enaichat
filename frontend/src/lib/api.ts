@@ -9,8 +9,6 @@ const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || '';
 const nonRunningAgentRuns = new Set<string>();
 // Map to keep track of active EventSource streams
 const activeStreams = new Map<string, EventSource>();
-// Map to keep track of safety timeouts
-const safetyTimeouts = new Map<string, number>();
 
 /**
  * Helper function to safely cleanup EventSource connections
@@ -30,13 +28,6 @@ const cleanupEventSource = (agentRunId: string, reason?: string): void => {
     
     // Remove from active streams
     activeStreams.delete(agentRunId);
-  }
-
-  // Clear any associated safety timeout
-  const timeout = safetyTimeouts.get(agentRunId);
-  if (timeout) {
-    clearTimeout(timeout);
-    safetyTimeouts.delete(agentRunId);
   }
 };
 
@@ -185,6 +176,8 @@ export type Project = {
     pass?: string;
   };
   is_public?: boolean; // Flag to indicate if the project is public
+  // Icon system field for thread categorization
+  icon_name?: string | null;
   [key: string]: any; // Allow additional properties to handle database fields
 };
 
@@ -204,9 +197,6 @@ export type Message = {
   agent_id?: string;
   agents?: {
     name: string;
-    avatar?: string;
-    avatar_color?: string;
-    profile_image_url?: string;
   };
 };
 
@@ -245,65 +235,6 @@ export interface FileInfo {
   permissions?: string;
 }
 
-export type WorkflowExecution = {
-  id: string;
-  workflow_id: string;
-  workflow_name: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-  started_at: string | null;
-  completed_at: string | null;
-  result: any;
-  error: string | null;
-};
-
-export type WorkflowExecutionLog = {
-  id: string;
-  execution_id: string;
-  node_id: string;
-  node_name: string;
-  node_type: string;
-  started_at: string;
-  completed_at: string | null;
-  status: 'running' | 'completed' | 'failed';
-  input_data: any;
-  output_data: any;
-  error: string | null;
-};
-
-// Workflow Types
-export type Workflow = {
-  id: string;
-  name: string;
-  description: string;
-  status: 'draft' | 'active' | 'paused' | 'disabled' | 'archived';
-  project_id: string;
-  account_id: string;
-  definition: {
-    name: string;
-    description: string;
-    nodes: any[];
-    edges: any[];
-    variables?: Record<string, any>;
-  };
-  created_at: string;
-  updated_at: string;
-};
-
-export type WorkflowNode = {
-  id: string;
-  type: string;
-  position: { x: number; y: number };
-  data: any;
-};
-
-export type WorkflowEdge = {
-  id: string;
-  source: string;
-  target: string;
-  sourceHandle?: string;
-  targetHandle?: string;
-};
-
 // Project APIs
 export const getProjects = async (): Promise<Project[]> => {
   try {
@@ -325,7 +256,8 @@ export const getProjects = async (): Promise<Project[]> => {
     const { data, error } = await supabase
       .from('projects')
       .select('*')
-      .eq('account_id', userData.user.id);
+      .eq('account_id', userData.user.id)
+      .order('created_at', { ascending: false });
 
     if (error) {
       // Handle permission errors specifically
@@ -354,6 +286,8 @@ export const getProjects = async (): Promise<Project[]> => {
         vnc_preview: '',
         sandbox_url: '',
       },
+      // Include icon field for thread categorization
+      icon_name: project.icon_name,
     }));
 
     return mappedProjects;
@@ -696,9 +630,7 @@ export const getMessages = async (threadId: string): Promise<Message[]> => {
       .select(`
         *,
         agents:agent_id (
-          name,
-          avatar,
-          avatar_color
+          name
         )
       `)
       .eq('thread_id', threadId)
@@ -722,6 +654,30 @@ export const getMessages = async (threadId: string): Promise<Message[]> => {
     }
   }
 
+  // Extract context_usage from the latest llm_response_end message
+  try {
+    const llmResponseEndMessages = allMessages.filter(msg => msg.type === 'llm_response_end');
+    
+    // Find the most recent llm_response_end message
+    if (llmResponseEndMessages.length > 0) {
+      const latestMsg = llmResponseEndMessages[llmResponseEndMessages.length - 1];
+      try {
+        const content = typeof latestMsg.content === 'string' ? JSON.parse(latestMsg.content) : latestMsg.content;
+        if (content?.usage?.total_tokens) {
+          // Store context usage
+          const { useContextUsageStore } = await import('@/lib/stores/context-usage-store');
+          useContextUsageStore.getState().setUsage(threadId, {
+            current_tokens: content.usage.total_tokens
+          });
+        }
+      } catch (e) {
+        console.warn('Failed to parse llm_response_end message:', e);
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to extract context_usage from llm_response_end:', e);
+  }
+
   return allMessages;
 };
 
@@ -730,9 +686,6 @@ export const startAgent = async (
   threadId: string,
   options?: {
     model_name?: string;
-    enable_thinking?: boolean;
-    reasoning_effort?: string;
-    stream?: boolean;
     agent_id?: string; // Optional again
   },
 ): Promise<{ agent_run_id: string }> => {
@@ -754,19 +707,14 @@ export const startAgent = async (
     }
 
     const defaultOptions = {
-      model_name: 'claude-3-7-sonnet-latest',
-      enable_thinking: false,
-      reasoning_effort: 'low',
-      stream: true,
+      model_name: 'anthropic/claude-3-7-sonnet-latest',
     };
 
     const finalOptions = { ...defaultOptions, ...options };
 
     const body: any = {
       model_name: finalOptions.model_name,
-      enable_thinking: finalOptions.enable_thinking,
-      reasoning_effort: finalOptions.reasoning_effort,
-      stream: finalOptions.stream,
+      stream: true, // Always stream for better UX
     };
     
     // Only include agent_id if it's provided
@@ -975,6 +923,60 @@ export const getAgentStatus = async (agentRunId: string): Promise<AgentRun> => {
   }
 };
 
+export interface AgentIconGenerationRequest {
+  name: string;
+  description?: string;
+}
+
+export interface AgentIconGenerationResponse {
+  icon_name: string;
+  icon_color: string;
+  icon_background: string;
+}
+
+export const generateAgentIcon = async (request: AgentIconGenerationRequest): Promise<AgentIconGenerationResponse> => {
+  try {
+    const supabase = createClient();
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
+    if (!session?.access_token) {
+      throw new NoAccessTokenAvailableError();
+    }
+
+    const response = await fetch(`${API_URL}/agents/generate-icon`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify(request),
+    });
+
+    if (!response.ok) {
+      const errorText = await response
+        .text()
+        .catch(() => 'No error details available');
+      console.error(
+        `[API] Error generating agent icon: ${response.status} ${response.statusText}`,
+        errorText,
+      );
+
+      throw new Error(
+        `Error generating agent icon: ${response.statusText} (${response.status})`,
+      );
+    }
+
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error('[API] Failed to generate agent icon:', error);
+    handleApiError(error, { operation: 'generate agent icon', resource: 'agent icon generation' });
+    throw error;
+  }
+};
+
 export const getAgentRuns = async (threadId: string): Promise<AgentRun[]> => {
   try {
     const supabase = createClient();
@@ -1006,6 +1008,48 @@ export const getAgentRuns = async (threadId: string): Promise<AgentRun[]> => {
 
     console.error('Failed to get agent runs:', error);
     handleApiError(error, { operation: 'load agent runs', resource: 'conversation history' });
+    throw error;
+  }
+};
+
+export interface ActiveAgentRun {
+  id: string;
+  thread_id: string;
+  status: 'running';
+  started_at: string;
+}
+
+export const getActiveAgentRuns = async (): Promise<ActiveAgentRun[]> => {
+  try {
+    const supabase = createClient();
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
+    if (!session?.access_token) {
+      throw new NoAccessTokenAvailableError();
+    }
+
+    const response = await fetch(`${API_URL}/agent-runs/active`, {
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      cache: 'no-store',
+    });
+
+    if (!response.ok) {
+      throw new Error(`Error getting active agent runs: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data.active_runs || [];
+  } catch (error) {
+    if (error instanceof NoAccessTokenAvailableError) {
+      throw error;
+    }
+
+    console.error('Failed to get active agent runs:', error);
+    handleApiError(error, { operation: 'get active agent runs', resource: 'active agent runs', silent: true });
     throw error;
   }
 };
@@ -1078,17 +1122,6 @@ export const streamAgent = (
       const eventSource = new EventSource(url.toString());
 
       activeStreams.set(agentRunId, eventSource);
-
-      // Safety timeout to prevent indefinite connections (30 minutes)
-      const safetyTimeout = setTimeout(() => {
-        console.warn(`[STREAM] Safety timeout reached for ${agentRunId}, cleaning up`);
-        cleanupEventSource(agentRunId, 'safety timeout');
-        callbacks.onError('Connection timeout - stream has been running too long');
-        callbacks.onClose();
-      }, 30 * 60 * 1000); // 30 minutes
-
-      // Store the timeout ID for cleanup
-      safetyTimeouts.set(agentRunId, safetyTimeout as unknown as number);
 
       eventSource.onopen = () => {
         console.log(`[STREAM] EventSource opened for ${agentRunId}`);
@@ -1786,9 +1819,7 @@ export interface UsageLogEntry {
 export interface UsageLogsResponse {
   logs: UsageLogEntry[];
   has_more: boolean;
-  message?: string;
-  subscription_limit?: number;
-  cumulative_cost?: number;
+  total_count?: number;
 }
 
 export interface BillingStatusResponse {
@@ -2129,7 +2160,6 @@ export const getAvailableModels = async (): Promise<AvailableModelsResponse> => 
     throw error;
   }
 };
-
 
 export const checkBillingStatus = async (): Promise<BillingStatusResponse> => {
   try {

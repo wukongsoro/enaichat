@@ -17,11 +17,13 @@ import { createClient } from '@/lib/supabase/client';
 import { clearUserLocalStorage } from '@/lib/utils/clear-local-storage';
 import { useMaintenanceNoticeQuery } from '@/hooks/react-query/edge-flags';
 import { MaintenanceAlert } from '@/components/maintenance-alert';
+import { useAuth } from '@/components/AuthProvider';
 
 export default function ActivateTrialPage() {
   const router = useRouter();
-  const { data: subscription, isLoading: isLoadingSubscription } = useSubscription();
-  const { data: trialStatus, isLoading: isLoadingTrial } = useTrialStatus();
+  const { user } = useAuth();
+  const { data: subscription, isLoading: isLoadingSubscription } = useSubscription(!!user);
+  const { data: trialStatus, isLoading: isLoadingTrial } = useTrialStatus(!!user);
   const startTrialMutation = useStartTrial();
   const { data: maintenanceNotice, isLoading: maintenanceLoading } = useMaintenanceNoticeQuery();
 
@@ -128,7 +130,7 @@ export default function ActivateTrialPage() {
               <div className="flex items-start gap-3">
                 <CheckCircle className="h-5 w-5 text-green-500 mt-0.5 flex-shrink-0" />
                 <div>
-                  <p className="font-medium">$20 in Credits</p>
+                  <p className="font-medium">$5 in Credits</p>
                   <p className="text-sm text-muted-foreground">Full access to all AI models</p>
                 </div>
               </div>

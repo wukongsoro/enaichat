@@ -1,4 +1,4 @@
-from core.agentpress.tool import ToolResult, openapi_schema, usage_example
+from core.agentpress.tool import ToolResult, openapi_schema, tool_metadata
 from core.sandbox.tool_base import SandboxToolsBase
 from core.utils.files_utils import should_exclude_file, clean_path
 from core.agentpress.thread_manager import ThreadManager
@@ -11,13 +11,21 @@ import openai
 import asyncio
 from typing import Optional
 
+@tool_metadata(
+    display_name="Files & Folders",
+    description="Create, edit, read, and organize files in your workspace",
+    icon="FolderOpen",
+    color="bg-blue-100 dark:bg-blue-800/50",
+    is_core=True,
+    weight=10,
+    visible=True
+)
 class SandboxFilesTool(SandboxToolsBase):
     """Tool for executing file system operations in a Daytona sandbox. All operations are performed relative to the /workspace directory."""
 
     def __init__(self, project_id: str, thread_manager: ThreadManager):
         super().__init__(project_id, thread_manager)
         self.SNIPPET_LINES = 4  # Number of context lines to show around edits
-        self.workspace_path = "/workspace"  # Ensure we're always operating in /workspace
 
     def clean_path(self, path: str) -> str:
         """Clean and normalize a path to be relative to /workspace"""
@@ -103,21 +111,6 @@ class SandboxFilesTool(SandboxToolsBase):
             }
         }
     })
-    @usage_example('''
-        <function_calls>
-        <invoke name="create_file">
-        <parameter name="file_path">src/main.py</parameter>
-        <parameter name="file_contents">
-        # This is the file content
-        def main():
-            print("Hello, World!")
-        
-        if __name__ == "__main__":
-            main()
-        </parameter>
-        </invoke>
-        </function_calls>
-        ''')
     async def create_file(self, file_path: str, file_contents: str, permissions: str = "644") -> ToolResult:
         try:
             # Ensure sandbox is initialized
@@ -132,11 +125,11 @@ class SandboxFilesTool(SandboxToolsBase):
             parent_dir = '/'.join(full_path.split('/')[:-1])
             if parent_dir:
                 await self.sandbox.fs.create_folder(parent_dir, "755")
-            
+
             # convert to json string if file_contents is a dict
             if isinstance(file_contents, dict):
                 file_contents = json.dumps(file_contents, indent=4)
-            
+
             # Write the file content
             await self.sandbox.fs.upload_file(file_contents.encode(), full_path)
             await self.sandbox.fs.set_file_permissions(full_path, permissions)
@@ -182,15 +175,6 @@ class SandboxFilesTool(SandboxToolsBase):
             }
         }
     })
-    @usage_example('''
-        <function_calls>
-        <invoke name="str_replace">
-        <parameter name="file_path">src/main.py</parameter>
-        <parameter name="old_str">text to replace (must appear exactly once in the file)</parameter>
-        <parameter name="new_str">replacement text that will be inserted instead</parameter>
-        </invoke>
-        </function_calls>
-        ''')
     async def str_replace(self, file_path: str, old_str: str, new_str: str) -> ToolResult:
         try:
             # Ensure sandbox is initialized
@@ -259,19 +243,6 @@ class SandboxFilesTool(SandboxToolsBase):
             }
         }
     })
-    @usage_example('''
-        <function_calls>
-        <invoke name="full_file_rewrite">
-        <parameter name="file_path">src/main.py</parameter>
-        <parameter name="file_contents">
-        This completely replaces the entire file content.
-        Use when making major changes to a file or when the changes
-        are too extensive for str-replace.
-        All previous content will be lost and replaced with this text.
-        </parameter>
-        </invoke>
-        </function_calls>
-        ''')
     async def full_file_rewrite(self, file_path: str, file_contents: str, permissions: str = "644") -> ToolResult:
         try:
             # Ensure sandbox is initialized
@@ -281,7 +252,7 @@ class SandboxFilesTool(SandboxToolsBase):
             full_path = f"{self.workspace_path}/{file_path}"
             if not await self._file_exists(full_path):
                 return self.fail_response(f"File '{file_path}' does not exist. Use create_file to create a new file.")
-            
+
             await self.sandbox.fs.upload_file(file_contents.encode(), full_path)
             await self.sandbox.fs.set_file_permissions(full_path, permissions)
             
@@ -318,13 +289,6 @@ class SandboxFilesTool(SandboxToolsBase):
             }
         }
     })
-    @usage_example('''
-        <function_calls>
-        <invoke name="delete_file">
-        <parameter name="file_path">src/main.py</parameter>
-        </invoke>
-        </function_calls>
-        ''')
     async def delete_file(self, file_path: str) -> ToolResult:
         try:
             # Ensure sandbox is initialized
@@ -434,56 +398,8 @@ class SandboxFilesTool(SandboxToolsBase):
             }
         }
     })
-    @usage_example('''
-        <!-- Example: Mark multiple scattered tasks as complete in a todo list -->
-        <function_calls>
-        <invoke name="edit_file">
-        <parameter name="target_file">todo.md</parameter>
-        <parameter name="instructions">I am marking the research and setup tasks as complete in my todo list.</parameter>
-        <parameter name="code_edit">
-// ... existing code ...
-- [x] Research topic A
-- [ ] Research topic B
-- [x] Research topic C
-// ... existing code ...
-- [x] Setup database
-- [x] Configure server
-// ... existing code ...
-        </parameter>
-        </invoke>
-        </function_calls>
-
-        <!-- Example: Add error handling and logging to a function -->
-        <function_calls>
-        <invoke name="edit_file">
-        <parameter name="target_file">src/main.py</parameter>
-        <parameter name="instructions">I am adding error handling and logging to the user authentication function</parameter>
-        <parameter name="code_edit">
-// ... existing imports ...
-from my_app.logging import logger
-from my_app.exceptions import DatabaseError
-// ... existing code ...
-def authenticate_user(username, password):
-    try:
-        user = get_user(username)
-        if user and verify_password(password, user.password_hash):
-            return user
-        return None
-    except DatabaseError as e:
-        logger.error(f"Database error during authentication: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error during authentication: {e}")
-        return None
-// ... existing code ...
-        </parameter>
-        </invoke>
-        </function_calls>
-        ''')
     async def edit_file(self, target_file: str, instructions: str, code_edit: str) -> ToolResult:
-        """Edit a file using AI-powered intelligent editing with fallback to string replacement"""
         try:
-            # Ensure sandbox is initialized
             await self._ensure_sandbox()
             
             target_file = self.clean_path(target_file)
@@ -491,20 +407,61 @@ def authenticate_user(username, password):
             if not await self._file_exists(full_path):
                 return self.fail_response(f"File '{target_file}' does not exist")
             
-            # Read current content
             original_content = (await self.sandbox.fs.download_file(full_path)).decode()
             
-            # Try Morph AI editing first
+            is_tiptap_doc = False
+            original_wrapper = None
+            if target_file.startswith("docs/") and target_file.endswith(".doc"):
+                try:
+                    original_wrapper = json.loads(original_content)
+                    if original_wrapper.get("type") == "tiptap_document":
+                        is_tiptap_doc = True
+                except json.JSONDecodeError:
+                    pass
+            
             logger.debug(f"Attempting AI-powered edit for file '{target_file}' with instructions: {instructions[:100]}...")
             new_content, error_message = await self._call_morph_api(original_content, code_edit, instructions, target_file)
 
             if error_message:
-                return ToolResult(success=False, output=json.dumps({
-                    "message": f"AI editing failed: {error_message}",
-                    "file_path": target_file,
-                    "original_content": original_content,
-                    "updated_content": None
-                }))
+                if is_tiptap_doc and original_wrapper:
+                    logger.debug(f"Morph AI edit failed for TipTap doc: {error_message}, attempting fallback manual update")
+                    
+                    if "title" in instructions:
+                        import re
+                        title_match = re.search(r'"title"\s*field\s*to\s*"([^"]+)"', instructions)
+                        if title_match:
+                            original_wrapper["title"] = title_match.group(1)
+                    
+                    if "content" in instructions and "content" in code_edit:
+                        content_match = re.search(r'"content":\s*([^,}]+)', code_edit)
+                        if content_match:
+                            try:
+                                new_html_content = json.loads(content_match.group(1).strip())
+                                original_wrapper["content"] = new_html_content
+                            except:
+                                pass
+                    
+                    if "metadata" in instructions:
+                        metadata_match = re.search(r'"metadata":\s*({[^}]+})', code_edit)
+                        if metadata_match:
+                            try:
+                                new_metadata = json.loads(metadata_match.group(1))
+                                original_wrapper["metadata"] = new_metadata
+                            except:
+                                pass
+                    
+                    if "updated_at" in instructions:
+                        from datetime import datetime
+                        original_wrapper["updated_at"] = datetime.now().isoformat()
+                    
+                    new_content = json.dumps(original_wrapper, indent=2)
+                else:
+                    return ToolResult(success=False, output=json.dumps({
+                        "message": f"AI editing failed: {error_message}",
+                        "file_path": target_file,
+                        "original_content": original_content,
+                        "updated_content": None
+                    }))
 
             if new_content is None:
                 return ToolResult(success=False, output=json.dumps({
@@ -522,10 +479,8 @@ def authenticate_user(username, password):
                     "updated_content": original_content
                 }))
 
-            # AI editing successful
             await self.sandbox.fs.upload_file(new_content.encode(), full_path)
             
-            # Return rich data for frontend diff view
             return ToolResult(success=True, output=json.dumps({
                 "message": f"File '{target_file}' edited successfully.",
                 "file_path": target_file,

@@ -43,10 +43,6 @@ class MessageCreateRequest:
 @dataclass
 class AgentStartRequest:
     model_name: Optional[str] = None
-    enable_thinking: Optional[bool] = False
-    reasoning_effort: Optional[str] = "low"
-    stream: Optional[bool] = True
-    enable_context_manager: Optional[bool] = False
     agent_id: Optional[str] = None
 
 
@@ -166,8 +162,6 @@ class AgentResponse:
     marketplace_published_at: Optional[str]
     download_count: Optional[int]
     tags: Optional[List[str]]
-    avatar: Optional[str]
-    avatar_color: Optional[str]
     created_at: str
     updated_at: Optional[str]
     current_version_id: Optional[str]

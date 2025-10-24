@@ -23,7 +23,7 @@ import {
   useStopAgentMutation,
 } from '@/hooks/react-query/threads/use-agent-run';
 import { useSharedSubscription } from '@/contexts/SubscriptionContext';
-import { SubscriptionStatus } from '@/components/thread/chat-input/_use-model-selection';
+export type SubscriptionStatus = 'no_subscription' | 'active';
 
 import {
   UnifiedMessage,
@@ -63,7 +63,6 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
   const queryClient = useQueryClient();
 
   // State
-  const [newMessage, setNewMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [fileViewerOpen, setFileViewerOpen] = useState(false);
   const [fileToView, setFileToView] = useState<string | null>(null);
@@ -167,7 +166,6 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
   const stopAgentMutation = useStopAgentMutation();
   const { data: threadAgentData } = useThreadAgent(threadId);
   const agent = threadAgentData?.agent;
-  const workflowId = threadQuery.data?.metadata?.workflow_id;
 
   useEffect(() => {
     queryClient.invalidateQueries({ queryKey: threadKeys.agentRuns(threadId) });
@@ -398,7 +396,7 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
   const handleSubmitMessage = useCallback(
     async (
       message: string,
-      options?: { model_name?: string; enable_thinking?: boolean },
+      options?: { model_name?: string },
     ) => {
       if (!message.trim()) return;
       setIsSending(true);
@@ -415,7 +413,6 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
       };
 
       setMessages((prev) => [...prev, optimisticUserMessage]);
-      setNewMessage('');
 
       // Auto-scroll to bottom when user sends a message
       setTimeout(() => {
@@ -933,8 +930,6 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
           {/* Compact Chat Input */}
           <div className="flex-shrink-0 border-t border-border/20 bg-background p-4">
             <ChatInput
-              value={newMessage}
-              onChange={setNewMessage}
               onSubmit={handleSubmitMessage}
               placeholder={`Describe what you need help with...`}
               loading={isSending}
@@ -966,6 +961,7 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
               defaultShowSnackbar="tokens"
               showScrollToBottomIndicator={showScrollToBottom}
               onScrollToBottom={scrollToBottom}
+              threadId={threadId}
             />
           </div>
         </ThreadLayout>
@@ -1065,8 +1061,6 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
         >
           <div className={cn('mx-auto', isMobile ? 'w-full' : 'max-w-3xl')}>
             <ChatInput
-              value={newMessage}
-              onChange={setNewMessage}
               onSubmit={handleSubmitMessage}
               placeholder={`Describe what you need help with...`}
               loading={isSending}
@@ -1087,6 +1081,7 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
               agentName={agent && agent.name}
               selectedAgentId={selectedAgentId}
               onAgentSelect={handleAgentSelect}
+              threadId={threadId}
               hideAgentSelection={!!configuredAgentId}
               toolCalls={toolCalls}
               toolCallIndex={currentToolIndex}

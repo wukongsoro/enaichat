@@ -40,9 +40,7 @@ def build_unified_config(
     system_prompt: str,
     agentpress_tools: ConfigType,
     configured_mcps: List[ConfigType],
-    custom_mcps: List[ConfigType],
-    avatar: Optional[str] = None,
-    avatar_color: Optional[str] = None
+    custom_mcps: List[ConfigType]
 ) -> ConfigType:
     try:
         from core.config_helper import build_unified_config as build_config
@@ -50,9 +48,7 @@ def build_unified_config(
             system_prompt=system_prompt,
             agentpress_tools=agentpress_tools,
             configured_mcps=configured_mcps,
-            custom_mcps=custom_mcps,
-            avatar=avatar,
-            avatar_color=avatar_color
+            custom_mcps=custom_mcps
         )
     except ImportError:
         return {
@@ -62,10 +58,7 @@ def build_unified_config(
                 'mcp': configured_mcps,
                 'custom_mcp': custom_mcps
             },
-            'metadata': {
-                'avatar': avatar,
-                'avatar_color': avatar_color
-            }
+            'metadata': {}
         }
 
 
@@ -117,31 +110,37 @@ def is_suna_default_agent(agent_data: Dict[str, Any]) -> bool:
 
 
 def format_template_for_response(template: AgentTemplate) -> Dict[str, Any]:
+    from core.utils.logger import logger
+    
+    logger.debug(f"Formatting template {template.template_id}: usage_examples = {template.usage_examples}")
+    
     response = {
         'template_id': template.template_id,
         'creator_id': template.creator_id,
         'name': template.name,
-        'description': template.description,
         'system_prompt': template.system_prompt,
         'model': template.config.get('model'),
         'mcp_requirements': format_mcp_requirements_for_response(template.mcp_requirements),
         'agentpress_tools': template.agentpress_tools,
         'tags': template.tags,
+        'categories': template.categories,
         'is_public': template.is_public,
         'is_kortix_team': template.is_kortix_team,
         'marketplace_published_at': template.marketplace_published_at.isoformat() if template.marketplace_published_at else None,
         'download_count': template.download_count,
         'created_at': template.created_at.isoformat(),
         'updated_at': template.updated_at.isoformat(),
-        'avatar': template.avatar,
-        'avatar_color': template.avatar_color,
-        'profile_image_url': template.profile_image_url,
         'icon_name': template.icon_name,
         'icon_color': template.icon_color,
         'icon_background': template.icon_background,
         'metadata': template.metadata,
-        'creator_name': template.creator_name
+        'creator_name': template.creator_name,
+        'usage_examples': template.usage_examples,
+        'config': template.config,
     }
+    
+    logger.debug(f"Response for {template.template_id} includes usage_examples: {response.get('usage_examples')}")
+    
     return response
 
 
@@ -178,8 +177,7 @@ def search_templates_by_name(templates: List[AgentTemplate], query: str) -> List
     filtered = []
     
     for template in templates:
-        if (query in template.name.lower() or 
-            (template.description and query in template.description.lower())):
+        if query in template.name.lower():
             filtered.append(template)
     
     return filtered 
@@ -204,10 +202,7 @@ def sanitize_config_for_security(config: Dict[str, Any]) -> Dict[str, Any]:
             'mcp': config.get('tools', {}).get('mcp', []),
             'custom_mcp': []
         },
-        'metadata': {
-            'avatar': config.get('metadata', {}).get('avatar'),
-            'avatar_color': config.get('metadata', {}).get('avatar_color')
-        }
+        'metadata': {}
     }
     
     custom_mcps = config.get('tools', {}).get('custom_mcp', [])
@@ -217,18 +212,9 @@ def sanitize_config_for_security(config: Dict[str, Any]) -> Dict[str, Any]:
                 'name': mcp.get('name'),
                 'type': mcp.get('type'),
                 'display_name': mcp.get('display_name') or mcp.get('name'),
-                'enabledTools': mcp.get('enabledTools', [])
+                'enabledTools': mcp.get('enabledTools', []),
+                'config': {}
             }
-            
-            if mcp.get('type') == 'pipedream':
-                original_config = mcp.get('config', {})
-                sanitized_mcp['config'] = {
-                    'url': original_config.get('url'),
-                    'headers': {k: v for k, v in original_config.get('headers', {}).items() 
-                              if k != 'profile_id'}
-                }
-            else:
-                sanitized_mcp['config'] = {}
             
             sanitized['tools']['custom_mcp'].append(sanitized_mcp)
     
