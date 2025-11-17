@@ -1,47 +1,34 @@
-/**
- * Unified Chat Hook
- * 
- * Single source of truth for all chat state and operations.
- * Consolidates:
- * - useChatThread (chat orchestration)
- * - useThreadData (data loading)
- * - useAgentStream (streaming)
- * - useChatInput (input state)
- * - React Query hooks (API calls)
- */
-
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Alert, Keyboard } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
-import EventSource from 'react-native-sse';
 import { useQueryClient } from '@tanstack/react-query';
-import type { UnifiedMessage, ParsedContent, ParsedMetadata, Thread } from '@/api/types';
-import { API_URL, getAuthToken } from '@/api/config';
-import { safeJsonParse } from '@/lib/utils/message-grouping';
+import type { UnifiedMessage } from '@/api/types';
 import { useLanguage } from '@/contexts';
-import type { ToolMessagePair } from '@/components/chat/MessageRenderer';
+import type { ToolMessagePair } from '@/components/chat';
 import {
   useThreads,
   useThread,
   useMessages,
   useSendMessage as useSendMessageMutation,
-  useInitiateAgent as useInitiateAgentMutation,
+  useUnifiedAgentStart as useUnifiedAgentStartMutation,
   useStopAgentRun as useStopAgentRunMutation,
   useActiveAgentRuns,
   useUpdateThread,
   chatKeys,
 } from '@/lib/chat';
-import { 
+import {
   useUploadMultipleFiles,
   convertAttachmentsToFormDataFiles,
   generateFileReferences,
   validateFileSize,
 } from '@/lib/files';
-
-// ============================================================================
-// Types
-// ============================================================================
+import { transcribeAudio, validateAudioFile } from '@/lib/chat/transcription';
+import { useAgentStream } from './useAgentStream';
+import { useAgent } from '@/contexts/AgentContext';
+import { useAvailableModels } from '@/lib/models';
+import { useBillingContext } from '@/contexts/BillingContext';
+import { usePricingModalStore } from '@/stores/billing-modal-store';
 
 export interface Attachment {
   type: 'image' | 'video' | 'document';
@@ -55,7 +42,6 @@ export interface Attachment {
 }
 
 export interface UseChatReturn {
-  // Thread Management
   activeThread: {
     id: string;
     title?: string;
@@ -63,75 +49,68 @@ export interface UseChatReturn {
     createdAt: Date;
     updatedAt: Date;
   } | null;
-  threads: Thread[];
+  threads: any[];
   loadThread: (threadId: string) => void;
   startNewChat: () => void;
   updateThreadTitle: (newTitle: string) => Promise<void>;
   hasActiveThread: boolean;
+  refreshMessages: () => Promise<void>;
+  activeSandboxId?: string;
   
-  // Messages & Streaming
   messages: UnifiedMessage[];
   streamingContent: string;
-  streamingToolCall: ParsedContent | null;
+  streamingToolCall: any;
   isStreaming: boolean;
   
-  // Message Operations
   sendMessage: (content: string, agentId: string, agentName: string) => Promise<void>;
   stopAgent: () => void;
   
-  // Input State
   inputValue: string;
   setInputValue: (value: string) => void;
   attachments: Attachment[];
   addAttachment: (attachment: Attachment) => void;
   removeAttachment: (index: number) => void;
   
-  // Tool Drawer
   selectedToolData: {
     toolMessages: ToolMessagePair[];
     initialIndex: number;
   } | null;
   setSelectedToolData: (data: { toolMessages: ToolMessagePair[]; initialIndex: number; } | null) => void;
   
-  // Loading States
   isLoading: boolean;
   isSendingMessage: boolean;
   isAgentRunning: boolean;
   
-  // Attachment Actions
   handleTakePicture: () => Promise<void>;
   handleChooseImages: () => Promise<void>;
   handleChooseFiles: () => Promise<void>;
   
-  // Quick Actions
   selectedQuickAction: string | null;
+  selectedQuickActionOption: string | null;
   handleQuickAction: (actionId: string) => void;
+  setSelectedQuickActionOption: (optionId: string | null) => void;
   clearQuickAction: () => void;
   getPlaceholder: () => string;
   
-  // Attachment Drawer
   isAttachmentDrawerVisible: boolean;
   openAttachmentDrawer: () => void;
   closeAttachmentDrawer: () => void;
+  
+  transcribeAndAddToInput: (audioUri: string) => Promise<void>;
+  isTranscribing: boolean;
 }
-
-// ============================================================================
-// Main Hook
-// ============================================================================
 
 export function useChat(): UseChatReturn {
   const { t } = useLanguage();
   const queryClient = useQueryClient();
-
-  // ============================================================================
-  // State - Single Source of Truth
-  // ============================================================================
+  
+  const { selectedModelId, selectedAgentId } = useAgent();
+  const { data: modelsData } = useAvailableModels();
+  const { hasActiveSubscription } = useBillingContext();
 
   const [activeThreadId, setActiveThreadId] = useState<string | undefined>();
   const [agentRunId, setAgentRunId] = useState<string | null>(null);
   const [messages, setMessages] = useState<UnifiedMessage[]>([]);
-  const [streamingContent, setStreamingContent] = useState('');
-  const [streamingToolCall, setStreamingToolCall] = useState<ParsedContent | null>(null);
   const [inputValue, setInputValue] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [selectedToolData, setSelectedToolData] = useState<{
@@ -140,392 +119,361 @@ export function useChat(): UseChatReturn {
   } | null>(null);
   const [isAttachmentDrawerVisible, setIsAttachmentDrawerVisible] = useState(false);
   const [selectedQuickAction, setSelectedQuickAction] = useState<string | null>(null);
+  const [selectedQuickActionOption, setSelectedQuickActionOption] = useState<string | null>(null);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [isNewThreadOptimistic, setIsNewThreadOptimistic] = useState(false);
+  const [activeSandboxId, setActiveSandboxId] = useState<string | undefined>(undefined);
+  const [userInitiatedRun, setUserInitiatedRun] = useState(false);
 
-  // ============================================================================
-  // React Query Hooks
-  // ============================================================================
-
+  const { selectModel } = useAgent();
   const { data: threadsData = [] } = useThreads();
-  const { data: threadData, isLoading: isThreadLoading } = useThread(activeThreadId);
-  const { data: messagesData, isLoading: isMessagesLoading, refetch: refetchMessages } = useMessages(activeThreadId);
-  const { data: activeRuns } = useActiveAgentRuns();
+  
+  const availableModels = modelsData?.models || [];
+  
+  const accessibleModels = useMemo(() => {
+    return availableModels.filter(model => {
+      if (!model.requires_subscription) return true;
+      return hasActiveSubscription;
+    });
+  }, [availableModels, hasActiveSubscription]);
+  
+  useEffect(() => {
+    if (selectedModelId && accessibleModels.length > 0) {
+      const isModelAccessible = accessibleModels.some(m => m.id === selectedModelId);
+      if (!isModelAccessible) {
+        console.warn('⚠️ [useChat] Selected model is not accessible, clearing selection:', selectedModelId);
+        const recommendedModel = accessibleModels.find(m => m.recommended);
+        const fallbackModel = recommendedModel || accessibleModels[0];
+        if (fallbackModel) {
+          console.log('🔄 [useChat] Auto-selecting accessible model:', fallbackModel.id);
+          selectModel(fallbackModel.id);
+        }
+      }
+    }
+  }, [selectedModelId, accessibleModels, selectModel]);
+  
+  const currentModel = useMemo(() => {
+    console.log('🔍 [useChat] Model selection:', {
+      selectedModelId,
+      hasActiveSubscription,
+      totalModels: availableModels.length,
+      accessibleModels: accessibleModels.length,
+      accessibleModelIds: accessibleModels.map(m => m.id),
+    });
+    
+    if (selectedModelId) {
+      const model = accessibleModels.find(m => m.id === selectedModelId);
+      if (model) {
+        console.log('✅ [useChat] Using selected accessible model:', model.id);
+        return model.id;
+      }
+      console.warn('⚠️ [useChat] Selected model not accessible:', selectedModelId);
+    }
+    
+    const recommendedModel = accessibleModels.find(m => m.recommended);
+    const firstAccessibleModel = accessibleModels[0];
+    const fallbackModel = recommendedModel?.id || firstAccessibleModel?.id;
+    
+    console.log('⚠️ [useChat] Using fallback model:', fallbackModel, {
+      recommended: recommendedModel?.id,
+      firstAccessible: firstAccessibleModel?.id,
+    });
+    
+    return fallbackModel;
+  }, [selectedModelId, accessibleModels, hasActiveSubscription, availableModels.length]);
+  
+  const shouldFetchThread = !!activeThreadId;
+  const shouldFetchMessages = !!activeThreadId;
 
-  // Mutations
+  const { data: threadData, isLoading: isThreadLoading } = useThread(shouldFetchThread ? activeThreadId : undefined);
+  const { data: messagesData, isLoading: isMessagesLoading, refetch: refetchMessages } = useMessages(shouldFetchMessages ? activeThreadId : undefined);
+  const { data: activeRuns, refetch: refetchActiveRuns } = useActiveAgentRuns();
+
+  useEffect(() => {
+    if (threadData?.project?.sandbox?.id) {
+      setActiveSandboxId(threadData.project.sandbox.id);
+    } else if (!activeThreadId) {
+      setActiveSandboxId(undefined);
+    }
+  }, [threadData, activeThreadId]);
+
   const sendMessageMutation = useSendMessageMutation();
-  const initiateAgentMutation = useInitiateAgentMutation();
+  const unifiedAgentStartMutation = useUnifiedAgentStartMutation();
   const stopAgentRunMutation = useStopAgentRunMutation();
   const updateThreadMutation = useUpdateThread();
   const uploadFilesMutation = useUploadMultipleFiles();
 
-  // ============================================================================
-  // Streaming - Internal EventSource Management
-  // ============================================================================
+  const lastStreamStartedRef = useRef<string | null>(null);
 
-  const eventSourceRef = useRef<EventSource | null>(null);
-  const isMountedRef = useRef<boolean>(true);
-  const currentRunIdRef = useRef<string | null>(null);
-  const processedMessageIds = useRef<Set<string>>(new Set());
-  const completedRunIds = useRef<Set<string>>(new Set()); // Track completed runs
-
-  // Computed streaming state
-  const isStreaming = !!currentRunIdRef.current;
-
-  // Update streaming status
-  const addContentImmediate = useCallback((content: string) => {
-    setStreamingContent((prev) => prev + content);
-  }, []);
-
-  // Finalize stream
-  const finalizeStream = useCallback(() => {
-    if (!isMountedRef.current) return;
-
-    console.log('[useChat] Finalizing stream');
-    
-    // Mark this run as completed to prevent reconnection
-    if (currentRunIdRef.current) {
-      completedRunIds.current.add(currentRunIdRef.current);
-    }
-    
-    // Clear the current run ID to prevent re-connections
-    currentRunIdRef.current = null;
-    setAgentRunId(null);
-
-    // Reset streaming state
-    setStreamingContent('');
-    setStreamingToolCall(null);
-    processedMessageIds.current.clear();
-
-    // Refetch messages to get the final state
-    refetchMessages();
-  }, [refetchMessages]);
-
-  // Handle incoming stream messages
-  const handleStreamMessage = useCallback((rawData: string) => {
-    if (!isMountedRef.current) return;
-
-    let processedData = rawData;
-    if (processedData.startsWith('data: ')) {
-      processedData = processedData.substring(6).trim();
-    }
-    if (!processedData) return;
-
-    // Check for completion messages
-    if (
-      processedData === '{"type": "status", "status": "completed", "message": "Agent run completed successfully"}' ||
-      processedData.includes('Run data not available for streaming') ||
-      processedData.includes('Stream ended with status: completed')
-    ) {
-      console.log('[useChat] Stream completion detected, closing connection');
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
+  const handleNewMessageFromStream = useCallback(
+    (message: UnifiedMessage) => {
+      if (!message.message_id) {
+        console.warn(
+          `[STREAM HANDLER] Received message is missing ID: Type=${message.type}`,
+        );
       }
-      finalizeStream();
-      return;
-    }
 
-    // Check for error messages
-    try {
-      const jsonData = JSON.parse(processedData);
-      if (jsonData.status === 'error') {
-        console.error('[useChat] Received error status message:', jsonData);
-        if (eventSourceRef.current) {
-          eventSourceRef.current.close();
-          eventSourceRef.current = null;
-        }
-        finalizeStream();
-        return;
-      }
-    } catch (jsonError) {
-      // Not JSON, continue processing
-    }
-
-    // Parse JSON message
-    const message = safeJsonParse<UnifiedMessage | null>(processedData, null);
-    if (!message) {
-      console.warn('[useChat] Failed to parse streamed message:', processedData);
-      return;
-    }
-
-    const parsedContent = safeJsonParse<ParsedContent>(message.content, {});
-    const parsedMetadata = safeJsonParse<ParsedMetadata>(message.metadata, {});
-
-    switch (message.type) {
-      case 'assistant':
-        if (parsedMetadata.stream_status === 'chunk' && parsedContent.content) {
-          // Check if this chunk contains function_calls XML
-          const content = parsedContent.content;
-          
-          // Detect <function_calls> start
-          if (content.includes('<function_calls>')) {
-            console.log('[useChat] Detected <function_calls> in stream');
-            // Clear streaming text content
-            setStreamingContent('');
-            
-            // Try to extract function name from <invoke name="...">
-            const invokeMatch = content.match(/<invoke name="([^"]+)">/);
-            if (invokeMatch) {
-              const functionName = invokeMatch[1];
-              console.log('[useChat] Extracted function name:', functionName);
-              
-              setStreamingToolCall({
-                role: 'assistant',
-                status_type: 'tool_started',
-                name: functionName,
-                function_name: functionName,
-                arguments: {},
-              });
-            } else {
-              // Show generic loading if we can't extract name yet
-              setStreamingToolCall({
-                role: 'assistant',
-                status_type: 'tool_started',
-                name: 'Tool',
-                function_name: 'Tool',
-                arguments: {},
-              });
+      setMessages((prev) => {
+        const messageExists = prev.some(
+          (m) => m.message_id === message.message_id,
+        );
+        if (messageExists) {
+          return prev.map((m) =>
+            m.message_id === message.message_id ? message : m,
+          );
+        } else {
+          if (message.type === 'user') {
+            const optimisticIndex = prev.findIndex(
+              (m) =>
+                m.type === 'user' &&
+                m.message_id?.startsWith('optimistic-') &&
+                m.content === message.content,
+            );
+            if (optimisticIndex !== -1) {
+              console.log('[STREAM] Replacing optimistic user message with real one');
+              return prev.map((m, index) =>
+                index === optimisticIndex ? message : m,
+              );
             }
-          } else if (!streamingToolCall) {
-            // Only render text if we're not in tool call mode
-            addContentImmediate(content);
           }
-        } else if (parsedMetadata.stream_status === 'complete') {
-          // Clear streaming content as complete message will be added to history
-          setStreamingContent('');
-          setStreamingToolCall(null);
-
-          // Only emit if has message_id and not already processed
-          if (message.message_id && !processedMessageIds.current.has(message.message_id)) {
-            processedMessageIds.current.add(message.message_id);
-            // Add to messages immediately
-            setMessages((prev) => [...prev, message]);
-          }
-        } else if (!parsedMetadata.stream_status) {
-          // Handle non-chunked assistant messages
-          if (message.message_id && !processedMessageIds.current.has(message.message_id)) {
-            processedMessageIds.current.add(message.message_id);
-            setMessages((prev) => [...prev, message]);
-          }
+          return [...prev, message];
         }
-        break;
+      });
+    },
+    [],
+  );
 
-      case 'tool':
-        setStreamingToolCall(null); // Clear any streaming tool call
+  const handleStreamStatusChange = useCallback(
+    (hookStatus: string) => {
+      switch (hookStatus) {
+        case 'idle':
+        case 'completed':
+        case 'stopped':
+        case 'agent_not_running':
+        case 'error':
+        case 'failed':
+          setAgentRunId(null);
+          break;
+        case 'connecting':
+          break;
+        case 'streaming':
+          break;
+      }
+    },
+    [setAgentRunId],
+  );
 
-        // Only emit if has message_id and not already processed
-        if (message.message_id && !processedMessageIds.current.has(message.message_id)) {
-          processedMessageIds.current.add(message.message_id);
-          setMessages((prev) => [...prev, message]);
-        }
-        break;
+  const handleStreamError = useCallback((errorMessage: string) => {
+    const lower = errorMessage.toLowerCase();
+    const isExpected =
+      lower.includes('not found') || lower.includes('agent run is not running');
 
-      case 'status':
-        switch (parsedContent.status_type) {
-          case 'tool_started':
-            setStreamingToolCall({
-              role: 'assistant',
-              status_type: 'tool_started',
-              name: parsedContent.function_name,
-              function_name: parsedContent.function_name,
-              arguments: parsedContent.arguments,
-            });
-            break;
-
-          case 'tool_completed':
-            setStreamingToolCall(null);
-            break;
-
-          case 'thread_run_end':
-            // Don't finalize here - wait for explicit completion
-            console.log('[useChat] thread_run_end received');
-            break;
-        }
-        break;
-    }
-  }, [addContentImmediate, finalizeStream, streamingToolCall]);
-
-  // Start streaming
-  const startStreaming = useCallback(async (runId: string) => {
-    if (!isMountedRef.current) {
-      console.log('[useChat] Not mounted, skipping stream connection');
+    if (isExpected) {
+      console.info(`[PAGE] Stream skipped for inactive run: ${errorMessage}`);
       return;
     }
 
-    // Prevent duplicate streams
-    if (currentRunIdRef.current === runId) {
-      console.log('[useChat] Already streaming this run:', runId);
-      return;
-    }
-
-    // Close any existing stream
-    if (eventSourceRef.current) {
-      console.log('[useChat] Closing existing stream before starting new one');
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
-
-    console.log('[useChat] Starting stream for run:', runId);
-    currentRunIdRef.current = runId;
-
-    try {
-      const token = await getAuthToken();
-      const url = `${API_URL}/agent-run/${runId}/stream`;
-
-      const eventSource = new EventSource(url, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        pollingInterval: 0, // Disable reconnection
-      });
-
-      eventSourceRef.current = eventSource;
-
-      eventSource.addEventListener('open', () => {
-        console.log('[useChat] ✅ Stream connected');
-      });
-
-      eventSource.addEventListener('message', (event: any) => {
-        if (event.data) {
-          handleStreamMessage(event.data);
-        }
-      });
-
-      eventSource.addEventListener('error', (error: any) => {
-        console.error('[useChat] ❌ Stream error:', error);
-        if (eventSourceRef.current) {
-          eventSourceRef.current.close();
-          eventSourceRef.current = null;
-        }
-        finalizeStream();
-      });
-    } catch (error) {
-      console.error('[useChat] Failed to start stream:', error);
-      currentRunIdRef.current = null;
-      finalizeStream();
-    }
-  }, [handleStreamMessage, finalizeStream]);
-
-  // Stop streaming
-  const stopStreaming = useCallback(() => {
-    console.log('[useChat] Stopping stream');
-    
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
-
-    currentRunIdRef.current = null;
-    setStreamingContent('');
-    setStreamingToolCall(null);
-    processedMessageIds.current.clear();
+    console.error(`[PAGE] Stream hook error: ${errorMessage}`);
   }, []);
 
-  // ============================================================================
-  // Effects - Thread Management & Auto-Connect
-  // ============================================================================
+  const handleStreamClose = useCallback(() => { }, []);
 
-  // Set mounted state
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
+  const {
+    status: streamHookStatus,
+    textContent: streamingTextContent,
+    toolCall: streamingToolCall,
+    error: streamError,
+    agentRunId: currentHookRunId,
+    startStreaming,
+    stopStreaming,
+  } = useAgentStream(
+    {
+      onMessage: handleNewMessageFromStream,
+      onStatusChange: handleStreamStatusChange,
+      onError: handleStreamError,
+      onClose: handleStreamClose,
+    },
+    activeThreadId || '',
+    setMessages,
+    undefined,
+  );
 
-  // Thread change cleanup
+  const isStreaming = streamHookStatus === 'streaming' || streamHookStatus === 'connecting';
+
   const prevThreadIdRef = useRef<string | undefined>(undefined);
   
   useEffect(() => {
-    // Only cleanup if thread actually changed (not on initial load or same thread)
-    if (prevThreadIdRef.current && prevThreadIdRef.current !== activeThreadId) {
-      console.log('[useChat] Thread switched');
+    const prevThread = prevThreadIdRef.current;
+    const isThreadSwitch = prevThread && activeThreadId && prevThread !== activeThreadId;
+    
+    if (isThreadSwitch) {
+      console.log('[useChat] Thread switched from', prevThread, 'to', activeThreadId);
       
-      // Clear streaming state
-      setStreamingContent('');
-      setStreamingToolCall(null);
-      
-      // Close any active stream
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
-        currentRunIdRef.current = null;
-      }
+      setMessages([]);
+      lastStreamStartedRef.current = null;
     }
     
-    // Update the previous thread ID
     prevThreadIdRef.current = activeThreadId;
 
-    // Load messages for thread
     if (messagesData) {
-      setMessages(messagesData as unknown as UnifiedMessage[]);
-    }
-
-    // Check for active agent run
-    const activeRun = activeRuns?.find(r => r.thread_id === activeThreadId);
-    if (activeRun?.status === 'running' && !completedRunIds.current.has(activeRun.id)) {
-      console.log('[useChat] Found active agent run:', activeRun.id);
-      setAgentRunId(activeRun.id);
-    }
-  }, [activeThreadId, messagesData, activeRuns]);
-
-  // Auto-connect to stream
-  useEffect(() => {
-    if (agentRunId && activeThreadId && !currentRunIdRef.current) {
-      console.log('[useChat] Auto-connecting to stream:', agentRunId);
-      startStreaming(agentRunId);
-    } else if (!agentRunId && currentRunIdRef.current) {
-      console.log('[useChat] No agentRunId but stream active, stopping');
-      stopStreaming();
-    }
-  }, [agentRunId, activeThreadId, startStreaming, stopStreaming]);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
+      const unifiedMessages = messagesData as unknown as UnifiedMessage[];
+      
+      const shouldReload = messages.length === 0 || messagesData.length > messages.length + 50;
+      
+      if (shouldReload) {
+        setMessages((prev) => {
+          const serverIds = new Set(
+            unifiedMessages.map((m) => m.message_id).filter(Boolean) as string[]
+          );
+          
+          const localExtras = (prev || []).filter(
+            (m) =>
+              !m.message_id ||
+              (typeof m.message_id === 'string' && m.message_id.startsWith('optimistic-')) ||
+              !serverIds.has(m.message_id as string),
+          );
+          
+          const merged = [...unifiedMessages, ...localExtras].sort((a, b) => {
+            const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
+            const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
+            return aTime - bTime;
+          });
+          
+          console.log('🔄 [useChat] Merged messages:', {
+            server: unifiedMessages.length,
+            local: localExtras.length,
+            total: merged.length,
+          });
+          
+          return merged;
+        });
       }
-    };
-  }, []);
-
-  // Log loading state changes
-  useEffect(() => {
-    if (activeThreadId) {
-      console.log('📊 [useChat] Loading state:', {
-        isLoading: (isThreadLoading || isMessagesLoading),
-        isThreadLoading,
-        isMessagesLoading,
-        threadId: activeThreadId,
-      });
     }
-  }, [isThreadLoading, isMessagesLoading, activeThreadId]);
+  }, [messagesData, messages.length, activeThreadId]);
 
-  // ============================================================================
-  // Public API - Thread Operations
-  // ============================================================================
+  useEffect(() => {
+    if (!agentRunId || agentRunId === lastStreamStartedRef.current) {
+      return;
+    }
+
+    if (userInitiatedRun) {
+      console.log(`[useChat] Starting user-initiated stream for runId: ${agentRunId}`);
+      lastStreamStartedRef.current = agentRunId;
+      setUserInitiatedRun(false);
+      startStreaming(agentRunId);
+      return;
+    }
+
+    const activeRun = activeRuns?.find(r => r.id === agentRunId && r.status === 'running');
+    if (activeRun) {
+      console.log(`[useChat] Starting auto stream for runId: ${agentRunId}`);
+      lastStreamStartedRef.current = agentRunId;
+      startStreaming(agentRunId);
+    }
+  }, [agentRunId, startStreaming, userInitiatedRun, activeRuns]);
+
+  useEffect(() => {
+    if (
+      (streamHookStatus === 'completed' ||
+        streamHookStatus === 'stopped' ||
+        streamHookStatus === 'agent_not_running' ||
+        streamHookStatus === 'error')
+    ) {
+      setAgentRunId(null);
+      lastStreamStartedRef.current = null;
+      
+      if (streamHookStatus === 'completed' && activeThreadId) {
+        console.log('[useChat] Streaming completed, refetching in background');
+        setIsNewThreadOptimistic(false);
+        
+        queryClient.invalidateQueries({ 
+          queryKey: chatKeys.messages(activeThreadId),
+        });
+      }
+    }
+  }, [streamHookStatus, setAgentRunId, activeThreadId, queryClient]);
+
+  // Check for running agents when thread becomes active or app comes to foreground
+  useEffect(() => {
+    if (!activeThreadId || !activeRuns) {
+      return;
+    }
+
+    // If we don't have an agentRunId set but there's an active run for this thread, resume it
+    const runningAgentForThread = activeRuns.find(
+      run => run.thread_id === activeThreadId && run.status === 'running'
+    );
+
+    if (runningAgentForThread && !agentRunId && !lastStreamStartedRef.current) {
+      console.log('🔄 [useChat] Detected active run for current thread, resuming:', runningAgentForThread.id);
+      setAgentRunId(runningAgentForThread.id);
+    }
+  }, [activeThreadId, activeRuns, agentRunId]);
+
+  const refreshMessages = useCallback(async () => {
+    if (!activeThreadId || isStreaming) {
+      console.log('[useChat] Cannot refresh: no active thread or streaming in progress');
+      return;
+    }
+    
+    console.log('[useChat] 🔄 Refreshing messages for thread:', activeThreadId);
+    
+    try {
+      await refetchMessages();
+      
+      queryClient.invalidateQueries({ 
+        queryKey: chatKeys.messages(activeThreadId) 
+      });
+      
+      if (activeSandboxId) {
+        queryClient.invalidateQueries({ 
+          queryKey: ['files', 'sandbox', activeSandboxId],
+          refetchType: 'all',
+        });
+      }
+      
+      console.log('[useChat] ✅ Messages refreshed successfully');
+    } catch (error) {
+      console.error('[useChat] ❌ Failed to refresh messages:', error);
+      throw error;
+    }
+  }, [activeThreadId, isStreaming, refetchMessages, queryClient, activeSandboxId]);
 
   const loadThread = useCallback((threadId: string) => {
     console.log('[useChat] Loading thread:', threadId);
     console.log('🔄 [useChat] Thread loading initiated');
     
-    // Clear agent run ID first to prevent race condition
     setAgentRunId(null);
     
-    // Stop any active streaming
     stopStreaming();
     
-    // Clear completed runs tracking for fresh state
-    completedRunIds.current.clear();
-    
-    // Clear UI state
     setSelectedToolData(null);
     setInputValue('');
     setAttachments([]);
+    setIsNewThreadOptimistic(false);
     
-    // Set new thread
+    setMessages([]);
+    
     setActiveThreadId(threadId);
-  }, [stopStreaming]);
+    
+    // Refetch active runs to check if there's a running agent for this thread
+    console.log('🔍 [useChat] Checking for active agent runs...');
+    refetchActiveRuns().then(result => {
+      if (result.data) {
+        const runningAgentForThread = result.data.find(
+          run => run.thread_id === threadId && run.status === 'running'
+        );
+        if (runningAgentForThread) {
+          console.log('✅ [useChat] Found running agent, will auto-resume:', runningAgentForThread.id);
+          setAgentRunId(runningAgentForThread.id);
+        } else {
+          console.log('ℹ️ [useChat] No active agent run found for this thread');
+        }
+      }
+    }).catch(error => {
+      console.error('❌ [useChat] Failed to refetch active runs:', error);
+    });
+  }, [stopStreaming, refetchActiveRuns]);
 
   const startNewChat = useCallback(() => {
     console.log('[useChat] Starting new chat');
@@ -535,7 +483,8 @@ export function useChat(): UseChatReturn {
     setInputValue('');
     setAttachments([]);
     setSelectedToolData(null);
-    completedRunIds.current.clear();
+    setIsNewThreadOptimistic(false);
+    setActiveSandboxId(undefined);
     stopStreaming();
   }, [stopStreaming]);
 
@@ -562,9 +511,8 @@ export function useChat(): UseChatReturn {
     if (!content.trim() && attachments.length === 0) return;
 
     try {
-      console.log('[useChat] Sending message:', { content, agentId, agentName, activeThreadId, attachmentsCount: attachments.length });
+      console.log('[useChat] Sending message:', { content, agentId, agentName, activeThreadId, attachmentsCount: attachments.length, selectedQuickAction, selectedQuickActionOption });
       
-      // Validate file sizes
       for (const attachment of attachments) {
         const validation = validateFileSize(attachment.size);
         if (!validation.valid) {
@@ -576,54 +524,134 @@ export function useChat(): UseChatReturn {
       let currentThreadId = activeThreadId;
       
       if (!currentThreadId) {
-        // ========================================================================
-        // NEW THREAD: Use /agent/initiate with FormData
-        // ========================================================================
-        console.log('[useChat] Creating new thread via /agent/initiate');
+        console.log('[useChat] Creating new thread via /agent/start with optimistic UI');
         
-        // Convert attachments to FormData-compatible format
+        const optimisticUserMessage: UnifiedMessage = {
+          message_id: 'optimistic-user-' + Date.now(),
+          thread_id: 'optimistic',
+          type: 'user',
+          content: JSON.stringify({ content }),
+          metadata: JSON.stringify({}),
+          is_llm_message: false,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        setMessages([optimisticUserMessage]);
+        setIsNewThreadOptimistic(true);
+        console.log('✨ [useChat] INSTANT user message display');
+        
         const formDataFiles = attachments.length > 0
           ? await convertAttachmentsToFormDataFiles(attachments)
           : [];
         
         console.log('[useChat] Converted', formDataFiles.length, 'attachments for FormData');
         
-        const createResult = await initiateAgentMutation.mutateAsync({
-          prompt: content,
-          agent_id: agentId,
-          model_name: 'claude-sonnet-4',
-          files: formDataFiles as any, // FormData files for new thread
-        });
+        // Append hidden context for selected quick action options
+        let messageWithContext = content;
         
-        currentThreadId = createResult.thread_id;
-        console.log('[useChat] Thread created:', currentThreadId, 'Agent Run:', createResult.agent_run_id);
-        
-        // Set thread ID first
-        setActiveThreadId(currentThreadId);
-        
-        // Set agent run ID after a delay
-        if (createResult.agent_run_id) {
-          setTimeout(() => {
-            console.log('[useChat] Setting agent run ID:', createResult.agent_run_id);
-            setAgentRunId(createResult.agent_run_id);
-          }, 100);
+        if (selectedQuickAction === 'slides' && selectedQuickActionOption) {
+          messageWithContext += `\n\n----\n\n**Presentation Template:** ${selectedQuickActionOption}`;
+          console.log('[useChat] Appended slides template context to new thread:', selectedQuickActionOption);
         }
         
-        // Clear input and attachments AFTER successful send
-        setInputValue('');
-        setAttachments([]);
+        if (selectedQuickAction === 'image' && selectedQuickActionOption) {
+          messageWithContext += `\n\n----\n\n**Image Style:** ${selectedQuickActionOption}`;
+          console.log('[useChat] Appended image style context to new thread:', selectedQuickActionOption);
+        }
+        
+        if (!currentModel) {
+          console.error('❌ [useChat] No model available! Details:', {
+            totalModels: availableModels.length,
+            accessibleModels: accessibleModels.length,
+            selectedModelId,
+            hasActiveSubscription,
+          });
+          
+          usePricingModalStore.getState().openPricingModal({
+            alertTitle: hasActiveSubscription 
+              ? 'No models are currently available. Please try again later or contact support.'
+              : 'Upgrade to access AI models'
+          });
+          return;
+        }
+        
+        console.log('🚀 [useChat] Starting agent with accessible model:', currentModel);
+        
+        try {
+          const createResult = await unifiedAgentStartMutation.mutateAsync({
+            prompt: messageWithContext,
+            agentId: agentId,
+            modelName: currentModel,
+            files: formDataFiles as any,
+          });
+          
+          currentThreadId = createResult.thread_id;
+      
+          setActiveThreadId(currentThreadId);
+          
+          queryClient.refetchQueries({ 
+            queryKey: chatKeys.thread(currentThreadId),
+          });
+          
+          if (createResult.agent_run_id) {
+            console.log('[useChat] Starting INSTANT streaming:', createResult.agent_run_id);
+            setUserInitiatedRun(true);
+            setAgentRunId(createResult.agent_run_id);
+          }
+          
+          setInputValue('');
+          setAttachments([]);
+        } catch (agentStartError: any) {
+          console.error('[useChat] Error starting agent for new thread:', agentStartError);
+          
+          // Handle specific billing-related errors
+          const errorMessage = agentStartError?.message || '';
+          if (errorMessage.includes('402') && errorMessage.includes('PROJECT_LIMIT_EXCEEDED')) {
+            console.log('💳 Project limit exceeded - opening billing modal');
+            usePricingModalStore.getState().openPricingModal({
+              alertTitle: 'Project limit exceeded',
+              creditsExhausted: true
+            });
+            return;
+          }
+          
+          throw agentStartError;
+        }
       } else {
-        // ========================================================================
-        // EXISTING THREAD: Upload files to sandbox, then send message with references
-        // ========================================================================
         console.log('[useChat] Sending to existing thread:', currentThreadId);
+        
+        const optimisticUserMessage: UnifiedMessage = {
+          message_id: 'optimistic-user-' + Date.now(),
+          thread_id: currentThreadId,
+          type: 'user',
+          content: JSON.stringify({ content }),
+          metadata: JSON.stringify({}),
+          is_llm_message: false,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        
+        setMessages((prev) => [...prev, optimisticUserMessage]);
+        console.log('✨ [useChat] INSTANT user message display for existing thread');
+        
+        setIsNewThreadOptimistic(true);
         
         let messageContent = content;
         
-        // Upload files to sandbox if there are attachments
+        // Append hidden context for slides template
+        if (selectedQuickAction === 'slides' && selectedQuickActionOption) {
+          messageContent += `\n\n----\n\n**Presentation Template:** ${selectedQuickActionOption}`;
+          console.log('[useChat] Appended slides template context:', selectedQuickActionOption);
+        }
+        
+        // Append hidden context for image style
+        if (selectedQuickAction === 'image' && selectedQuickActionOption) {
+          messageContent += `\n\n----\n\n**Image Style:** ${selectedQuickActionOption}`;
+          console.log('[useChat] Appended image style context:', selectedQuickActionOption);
+        }
+        
         if (attachments.length > 0) {
-          // Get sandbox ID from thread data
-          const sandboxId = threadData?.project?.sandbox?.id;
+          const sandboxId = activeSandboxId;
           
           if (!sandboxId) {
             console.error('[useChat] No sandbox ID available for file upload');
@@ -636,14 +664,9 @@ export function useChat(): UseChatReturn {
           
           console.log('[useChat] Uploading', attachments.length, 'files to sandbox:', sandboxId);
           
-          // Mark attachments as uploading
-          setAttachments(prev => prev.map(a => ({ ...a, isUploading: true, uploadProgress: 0 })));
-          
           try {
-            // Convert attachments to upload format
             const filesToUpload = await convertAttachmentsToFormDataFiles(attachments);
             
-            // Upload files to sandbox with progress tracking
             const uploadResults = await uploadFilesMutation.mutateAsync({
               sandboxId,
               files: filesToUpload.map(f => ({
@@ -651,377 +674,345 @@ export function useChat(): UseChatReturn {
                 name: f.name,
                 type: f.type,
               })),
-              onProgress: (fileName: string, progress: number) => {
-                console.log('[useChat] Upload progress:', fileName, progress);
-                // Update progress for specific file
-                setAttachments(prev => prev.map(a => {
-                  const matchingFile = filesToUpload.find(f => f.name === fileName);
-                  if (matchingFile && a.uri === matchingFile.uri) {
-                    return { ...a, uploadProgress: progress };
-                  }
-                  return a;
-                }));
-              },
             });
             
             console.log('[useChat] Files uploaded successfully:', uploadResults.length);
             
-            // Mark upload complete
-            setAttachments(prev => prev.map(a => ({ ...a, isUploading: false, uploadProgress: 100 })));
-            
-            // Generate file references
             const filePaths = uploadResults.map(result => result.path);
             const fileReferences = generateFileReferences(filePaths);
             
-            // Append file references to message
-            messageContent = content
-              ? `${content}\n\n${fileReferences}`
+            messageContent = messageContent
+              ? `${messageContent}\n\n${fileReferences}`
               : fileReferences;
               
             console.log('[useChat] Message with file references prepared');
           } catch (uploadError) {
             console.error('[useChat] File upload failed:', uploadError);
             
-            // Mark attachments with error
-            setAttachments(prev => prev.map(a => ({ 
-              ...a, 
-              isUploading: false, 
-              uploadError: 'Upload failed' 
-            })));
-            
             Alert.alert(
               t('common.error'),
               t('attachments.uploadFailed') || 'Failed to upload files'
             );
-            return; // Don't send message if upload failed
+            return;
           }
         }
         
-        // Send message with file references (if any)
-        const result = await sendMessageMutation.mutateAsync({
-          threadId: currentThreadId,
-          message: messageContent,
-          modelName: 'claude-sonnet-4',
-        });
-        
-        console.log('[useChat] Message sent, agent run started:', result.agentRunId);
-        
-        // Set agent run ID
-        if (result.agentRunId) {
-          setAgentRunId(result.agentRunId);
+        if (!currentModel) {
+          console.error('❌ [useChat] No model available for sending message! Details:', {
+            totalModels: availableModels.length,
+            accessibleModels: accessibleModels.length,
+            selectedModelId,
+            hasActiveSubscription,
+          });
+          
+          usePricingModalStore.getState().openPricingModal({
+            alertTitle: hasActiveSubscription 
+              ? 'No models are currently available. Please try again later or contact support.'
+              : 'Upgrade to access AI models'
+          });
+          return;
         }
         
-        // Clear input and attachments AFTER successful send
-        setInputValue('');
-        setAttachments([]);
+        console.log('🚀 [useChat] Sending message with accessible model:', currentModel);
+        
+        try {
+          const result = await sendMessageMutation.mutateAsync({
+            threadId: currentThreadId,
+            message: messageContent,
+            modelName: currentModel,
+          });
+          
+          console.log('[useChat] Message sent, agent run started:', result.agentRunId);
+          
+          if (result.agentRunId) {
+            console.log('[useChat] Starting INSTANT streaming for existing thread:', result.agentRunId);
+            setUserInitiatedRun(true);
+            setAgentRunId(result.agentRunId);
+          }
+          
+          setIsNewThreadOptimistic(false);
+          
+          setInputValue('');
+          setAttachments([]);
+        } catch (sendMessageError: any) {
+          console.error('[useChat] Error sending message to existing thread:', sendMessageError);
+          const errorMessage = sendMessageError?.message || '';
+          if (errorMessage.includes('402') && errorMessage.includes('PROJECT_LIMIT_EXCEEDED')) {
+            console.log('💳 Project limit exceeded - opening billing modal');
+            usePricingModalStore.getState().openPricingModal({
+              alertTitle: 'Project limit exceeded',
+              creditsExhausted: true
+            });
+            return;
+          }
+          throw sendMessageError;
+        }
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('[useChat] Error sending message:', error);
-      // Reset attachment upload state on error
-      setAttachments(prev => prev.map(a => ({ 
-        ...a, 
-        isUploading: false, 
-        uploadError: 'Failed' 
-      })));
       throw error;
     }
   }, [
     activeThreadId,
     attachments,
     sendMessageMutation,
-    initiateAgentMutation,
+    unifiedAgentStartMutation,
     uploadFilesMutation,
-    threadData,
+    activeSandboxId,
+    selectedQuickAction,
+    selectedQuickActionOption,
     t,
   ]);
 
-  const stopAgent = useCallback(() => {
+  const stopAgent = useCallback(async () => {
     if (agentRunId) {
-      console.log('[useChat] Stopping agent run:', agentRunId);
+      console.log('[useChat] 🛑 Stopping agent run:', agentRunId);
       
-      // Clear UI state immediately for instant feedback
       const runIdToStop = agentRunId;
+      
       setAgentRunId(null);
-      stopStreaming();
       
-      // Make API call to stop on backend
-      stopAgentRunMutation.mutate(runIdToStop, {
-        onSuccess: () => {
-          console.log('[useChat] Agent run stopped successfully');
-        },
-        onError: (error) => {
-          console.error('[useChat] Failed to stop agent run:', error);
+      await stopStreaming();
+      
+      try {
+        await stopAgentRunMutation.mutateAsync(runIdToStop);
+        console.log('[useChat] ✅ Backend stop confirmed');
+        
+        queryClient.invalidateQueries({ queryKey: chatKeys.activeRuns() });
+        
+        if (activeThreadId) {
+          queryClient.invalidateQueries({ queryKey: chatKeys.messages(activeThreadId) });
+          refetchMessages();
         }
-      });
+      } catch (error) {
+        console.error('[useChat] ❌ Error stopping agent:', error);
+      }
     }
-  }, [agentRunId, stopAgentRunMutation, stopStreaming]);
-
-  // ============================================================================
-  // Public API - Attachment Operations
-  // ============================================================================
-
-  const handleTakePicture = useCallback(async () => {
-    console.log('[useChat] Take picture');
-    
-    try {
-      const { status } = await ImagePicker.requestCameraPermissionsAsync();
-      
-      if (status !== 'granted') {
-        console.log('[useChat] Camera permission denied');
-        Alert.alert(
-          t('attachments.cameraPermissionRequired'),
-          t('attachments.cameraPermissionMessage'),
-          [{ text: t('common.ok') }]
-        );
-        return;
-      }
-
-      console.log('[useChat] Opening camera');
-      
-      const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: ['images'],
-        allowsEditing: true,
-        quality: 0.8,
-      });
-
-      if (!result.canceled && result.assets && result.assets.length > 0) {
-        const asset = result.assets[0];
-        console.log('[useChat] Picture taken:', asset.uri);
-
-        const newAttachment: Attachment = {
-          type: 'image',
-          uri: asset.uri,
-          mimeType: asset.type,
-        };
-        
-        setAttachments(prev => [...prev, newAttachment]);
-      }
-    } catch (error) {
-      console.error('[useChat] Camera error:', error);
-      Alert.alert(t('common.error'), t('attachments.failedToOpenCamera'));
-    }
-  }, [t, attachments]);
-
-  const handleChooseImages = useCallback(async () => {
-    console.log('[useChat] Choose images');
-    
-    try {
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      
-      if (status !== 'granted') {
-        console.log('[useChat] Media library permission denied');
-        Alert.alert(
-          t('attachments.photosPermissionRequired'),
-          t('attachments.photosPermissionMessage'),
-          [{ text: t('common.ok') }]
-        );
-        return;
-      }
-
-      console.log('[useChat] Opening image picker');
-      
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images', 'videos'],
-        allowsMultipleSelection: true,
-        quality: 0.8,
-      });
-
-      if (!result.canceled && result.assets && result.assets.length > 0) {
-        console.log('[useChat] Selected', result.assets.length, 'items');
-        
-        const newAttachments: Attachment[] = result.assets.map((asset) => ({
-          type: asset.type === 'video' ? 'video' : 'image',
-          uri: asset.uri,
-          mimeType: asset.type,
-        }));
-        
-        setAttachments(prev => [...prev, ...newAttachments]);
-      }
-    } catch (error) {
-      console.error('[useChat] Image picker error:', error);
-      Alert.alert(t('common.error'), t('attachments.failedToOpenImagePicker'));
-    }
-  }, [t, attachments]);
-
-  const handleChooseFiles = useCallback(async () => {
-    console.log('[useChat] Choose files');
-    
-    try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: '*/*',
-        copyToCacheDirectory: true,
-        multiple: true,
-      });
-
-      if (result.canceled) {
-        console.log('[useChat] Document picker canceled');
-        return;
-      }
-
-      if (result.assets && result.assets.length > 0) {
-        console.log('[useChat] Selected', result.assets.length, 'files');
-        
-        const newAttachments: Attachment[] = result.assets.map((asset) => ({
-          type: 'document',
-          uri: asset.uri,
-          name: asset.name,
-          size: asset.size,
-          mimeType: asset.mimeType,
-        }));
-        
-        setAttachments(prev => [...prev, ...newAttachments]);
-      }
-    } catch (error) {
-      console.error('[useChat] Document picker error:', error);
-      Alert.alert(t('common.error'), t('attachments.failedToOpenFilePicker'));
-    }
-  }, [t, attachments]);
-
-  const removeAttachment = useCallback((index: number) => {
-    console.log('[useChat] Removing attachment at index:', index);
-    setAttachments(prev => prev.filter((_, i) => i !== index));
-  }, []);
+  }, [agentRunId, stopStreaming, stopAgentRunMutation, queryClient, activeThreadId, refetchMessages]);
 
   const addAttachment = useCallback((attachment: Attachment) => {
-    console.log('[useChat] Adding attachment:', attachment);
     setAttachments(prev => [...prev, attachment]);
   }, []);
 
-  // ============================================================================
-  // Public API - Quick Actions
-  // ============================================================================
+  const removeAttachment = useCallback((index: number) => {
+    setAttachments(prev => prev.filter((_, i) => i !== index));
+  }, []);
+
+  const handleTakePicture = useCallback(async () => {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    
+    if (status !== 'granted') {
+      Alert.alert(
+        t('permissions.cameraTitle'),
+        t('permissions.cameraMessage')
+      );
+      return;
+    }
+
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ['images'],
+      allowsEditing: false,
+      quality: 0.8,
+    });
+
+    if (!result.canceled && result.assets[0]) {
+      const asset = result.assets[0];
+      addAttachment({
+        type: 'image',
+        uri: asset.uri,
+        name: asset.fileName || `photo_${Date.now()}.jpg`,
+        mimeType: asset.mimeType || 'image/jpeg',
+      });
+    }
+    
+    setIsAttachmentDrawerVisible(false);
+  }, [t, addAttachment]);
+
+  const handleChooseImages = useCallback(async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    
+    if (status !== 'granted') {
+      Alert.alert(
+        t('permissions.galleryTitle'),
+        t('permissions.galleryMessage')
+      );
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsMultipleSelection: true,
+      quality: 0.8,
+    });
+
+    if (!result.canceled) {
+      result.assets.forEach(asset => {
+        addAttachment({
+          type: 'image',
+          uri: asset.uri,
+          name: asset.fileName || `image_${Date.now()}.jpg`,
+          mimeType: asset.mimeType || 'image/jpeg',
+        });
+      });
+    }
+    
+    setIsAttachmentDrawerVisible(false);
+  }, [t, addAttachment]);
+
+  const handleChooseFiles = useCallback(async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: '*/*',
+        multiple: true,
+        copyToCacheDirectory: true,
+      });
+
+      if (!result.canceled) {
+        result.assets.forEach(asset => {
+          addAttachment({
+            type: 'document',
+            uri: asset.uri,
+            name: asset.name,
+            size: asset.size || undefined,
+            mimeType: asset.mimeType || undefined,
+          });
+        });
+      }
+    } catch (error) {
+      console.error('Error picking document:', error);
+    }
+    
+    setIsAttachmentDrawerVisible(false);
+  }, [addAttachment]);
 
   const handleQuickAction = useCallback((actionId: string) => {
-    console.log('[useChat] Quick action:', actionId);
-    
-    if (selectedQuickAction === actionId) {
-      setSelectedQuickAction(null);
-    } else {
-      setSelectedQuickAction(actionId);
-    }
-  }, [selectedQuickAction]);
+    setSelectedQuickAction(actionId);
+    // Reset selected option when changing quick action
+    setSelectedQuickActionOption(null);
+  }, []);
 
   const clearQuickAction = useCallback(() => {
-    console.log('[useChat] Clearing quick action');
     setSelectedQuickAction(null);
+    setSelectedQuickActionOption(null);
   }, []);
 
   const getPlaceholder = useCallback(() => {
-    if (!selectedQuickAction) return t('placeholders.default');
-    
-    switch (selectedQuickAction) {
-      case 'image':
-        return t('placeholders.imageGeneration');
-      case 'slides':
-        return t('placeholders.slidesGeneration');
-      case 'data':
-        return t('placeholders.dataAnalysis');
-      case 'docs':
-        return t('placeholders.documentCreation');
-      case 'people':
-        return t('placeholders.peopleSearch');
-      case 'research':
-        return t('placeholders.researchQuery');
-      default:
-        return t('placeholders.default');
+    if (selectedQuickAction) {
+      switch (selectedQuickAction) {
+        case 'summarize':
+          return t('quickActions.summarizePlaceholder') || 'What would you like to summarize?';
+        case 'translate':
+          return t('quickActions.translatePlaceholder') || 'What would you like to translate?';
+        case 'explain':
+          return t('quickActions.explainPlaceholder') || 'What would you like explained?';
+        default:
+          return t('chat.inputPlaceholder') || 'Type a message...';
+      }
     }
+    return t('chat.inputPlaceholder') || 'Type a message...';
   }, [selectedQuickAction, t]);
 
-  // ============================================================================
-  // Public API - Attachment Drawer
-  // ============================================================================
-
   const openAttachmentDrawer = useCallback(() => {
-    console.log('[useChat] Opening attachment drawer');
-    Keyboard.dismiss(); // Dismiss keyboard to prevent interference
     setIsAttachmentDrawerVisible(true);
   }, []);
 
   const closeAttachmentDrawer = useCallback(() => {
-    console.log('[useChat] Closing attachment drawer');
     setIsAttachmentDrawerVisible(false);
   }, []);
 
-  // ============================================================================
-  // Computed State
-  // ============================================================================
+  const transcribeAndAddToInput = useCallback(async (audioUri: string) => {
+    try {
+      setIsTranscribing(true);
+      
+      const validation = await validateAudioFile(audioUri);
+      if (!validation.valid) {
+        Alert.alert(t('common.error'), validation.error || 'Invalid audio file');
+        return;
+      }
+
+      const transcript = await transcribeAudio(audioUri);
+      
+      if (transcript) {
+        setInputValue(prev => {
+          const separator = prev.trim() ? ' ' : '';
+          return prev + separator + transcript;
+        });
+      }
+    } catch (error) {
+      console.error('Transcription error:', error);
+      Alert.alert(
+        t('common.error'),
+        t('audio.transcriptionFailed') || 'Failed to transcribe audio'
+      );
+    } finally {
+      setIsTranscribing(false);
+    }
+  }, [t]);
 
   const activeThread = useMemo(() => {
-    if (!threadData) return null;
+    if (!activeThreadId || !threadData) return null;
+    
     return {
-      id: threadData.thread_id,
-      title: threadData.project?.name || threadData.title || 'New Chat',
-      messages: messages,
+      id: activeThreadId,
+      title: threadData.title,
+      messages,
       createdAt: new Date(threadData.created_at),
       updatedAt: new Date(threadData.updated_at),
     };
-  }, [threadData, messages]);
+  }, [activeThreadId, threadData, messages]);
 
-  const isAgentRunning = !!agentRunId || isStreaming;
-  
-  // Check if any attachments are currently uploading
-  const hasUploadingAttachments = attachments.some(a => a.isUploading);
-  
-  // Don't disable input during upload - only during message send/agent run
-  const isSendingMessage = sendMessageMutation.isPending || initiateAgentMutation.isPending;
-  
-  // Compute isLoading: true when thread data or messages are being fetched
-  const isLoading = (isThreadLoading || isMessagesLoading) && !!activeThreadId;
-
-  // ============================================================================
-  // Return Public API
-  // ============================================================================
+  const isLoading = (isThreadLoading || isMessagesLoading) && 
+    !!activeThreadId && 
+    !isNewThreadOptimistic && 
+    messages.length === 0;
 
   return {
-    // Thread Management
     activeThread,
     threads: threadsData,
     loadThread,
     startNewChat,
     updateThreadTitle,
     hasActiveThread: !!activeThreadId,
+    refreshMessages,
+    activeSandboxId,
     
-    // Messages & Streaming
     messages,
-    streamingContent,
+    streamingContent: streamingTextContent,
     streamingToolCall,
     isStreaming,
     
-    // Message Operations
     sendMessage,
     stopAgent,
     
-    // Input State
     inputValue,
     setInputValue,
     attachments,
     addAttachment,
     removeAttachment,
     
-    // Tool Drawer
     selectedToolData,
     setSelectedToolData,
     
-    // Loading States
     isLoading,
-    isSendingMessage,
-    isAgentRunning,
+    isSendingMessage: sendMessageMutation.isPending || unifiedAgentStartMutation.isPending,
+    isAgentRunning: isStreaming,
     
-    // Attachment Actions
     handleTakePicture,
     handleChooseImages,
     handleChooseFiles,
     
-    // Quick Actions
     selectedQuickAction,
+    selectedQuickActionOption,
     handleQuickAction,
+    setSelectedQuickActionOption,
     clearQuickAction,
     getPlaceholder,
     
-    // Attachment Drawer
     isAttachmentDrawerVisible,
     openAttachmentDrawer,
     closeAttachmentDrawer,
+    
+    transcribeAndAddToInput,
+    isTranscribing,
   };
 }
-

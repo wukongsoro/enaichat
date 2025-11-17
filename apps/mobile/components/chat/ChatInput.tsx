@@ -1,11 +1,10 @@
 import { Icon } from '@/components/ui/icon';
 import { Text } from '@/components/ui/text';
 import { useLanguage } from '@/contexts';
-import { BlurView } from 'expo-blur';
 import { AudioLines, CornerDownLeft, Paperclip, X, Image, Presentation, Table2, FileText, Users, Search, Square, Loader2 } from 'lucide-react-native';
 import { useColorScheme } from 'nativewind';
 import * as React from 'react';
-import { Keyboard, Pressable, ScrollView, TextInput, View, type ViewProps } from 'react-native';
+import { Keyboard, Pressable, ScrollView, TextInput, View, ViewStyle, type ViewProps } from 'react-native';
 import Animated, { 
   useAnimatedStyle, 
   useSharedValue, 
@@ -39,14 +38,18 @@ interface ChatInputProps extends ViewProps {
   agent?: Agent;
   isRecording?: boolean;
   recordingDuration?: number;
+  audioLevel?: number;
+  audioLevels?: number[]; // Time-series buffer for waveform
   attachments?: Attachment[];
   onRemoveAttachment?: (index: number) => void;
   selectedQuickAction?: string | null;
+  selectedQuickActionOption?: string | null;
   onClearQuickAction?: () => void;
   isAuthenticated?: boolean;
   onOpenAuthDrawer?: () => void;
   isAgentRunning?: boolean;
   isSendingMessage?: boolean;
+  isTranscribing?: boolean;
 }
 
 /**
@@ -78,14 +81,18 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
   agent,
   isRecording = false,
   recordingDuration = 0,
+  audioLevel = 0,
+  audioLevels = [],
   attachments = [],
   onRemoveAttachment,
   selectedQuickAction,
+  selectedQuickActionOption,
   onClearQuickAction,
   isAuthenticated = true,
   onOpenAuthDrawer,
   isAgentRunning = false,
   isSendingMessage = false,
+  isTranscribing = false,
   style,
   ...props 
 }, ref) => {
@@ -108,11 +115,11 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
     },
   }), []);
   
-  // Pulsing animation for agent running state
+  // Subtle fade animation for agent running state
   React.useEffect(() => {
     if (isAgentRunning) {
       pulseOpacity.value = withRepeat(
-        withTiming(0.5, { duration: 1000 }),
+        withTiming(0.85, { duration: 1500 }),
         -1,
         true
       );
@@ -133,6 +140,17 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
       rotation.value = withTiming(0, { duration: 0 });
     }
   }, [isSendingMessage]);
+
+  // Rotating animation for transcription state
+  React.useEffect(() => {
+    if (isTranscribing) {
+      rotation.value = withRepeat(
+        withTiming(360, { duration: 1000 }),
+        -1,
+        false
+      );
+    }
+  }, [isTranscribing]);
   
   // States
   const { colorScheme } = useColorScheme();
@@ -175,7 +193,7 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
   
   // Calculate dynamic height based on content
   const dynamicHeight = React.useMemo(() => {
-    const baseHeight = 140;
+    const baseHeight = 150;
     const maxHeight = 280;
     // No longer need attachment height as they're external
     const calculatedHeight = contentHeight + 80; // Add padding for controls
@@ -260,9 +278,10 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
 
   const handleButtonPress = () => {
     if (isAgentRunning) {
-      // Stop agent run
+      // Stop agent run immediately
       console.log('🛑 Stop agent run pressed');
       onStopAgentRun?.();
+      return; // Early return to prevent any other actions
     } else if (isRecording) {
       // Send audio recording
       handleSendAudioMessage();
@@ -285,47 +304,31 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
     const secs = seconds % 60;
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
+  
+  // Show transcription status in recording mode
+  const recordingStatusText = isTranscribing 
+    ? 'Transcribing...' 
+    : formatDuration(recordingDuration);
 
   return (
     <View 
-      className="relative rounded-3xl border border-border overflow-hidden"
-      style={[
-        { height: dynamicHeight }, 
-        style
-      ]}
+      className="relative rounded-3xl overflow-hidden"
+      style={{ height: dynamicHeight, ...(style as ViewStyle) }}
       {...props}
     >
-      {/* Blur Background */}
-      <BlurView
-        intensity={80}
-        tint={colorScheme === 'dark' ? 'dark' : 'light'}
-        className="absolute inset-0"
-      />
-      
-      {/* Semi-transparent background overlay */}
+      {/* Solid background */}
       <View 
-        className="absolute inset-0"
-        style={{ 
-          backgroundColor: colorScheme === 'dark' 
-            ? 'rgba(22, 22, 24, 0.7)' 
-            : 'rgba(255, 255, 255, 0.7)' 
-        }}
+        className="absolute inset-0 bg-[#ECECEC] dark:bg-[#1C1D20]"
       />
-
-      {/* Main Container */}
       <View className="p-4 flex-1">
         {isRecording ? (
-          /* Recording Mode UI */
           <>
-            {/* Waveform */}
             <View className="flex-1 items-center bottom-5 justify-center">
-              <AudioWaveform isRecording={true} barCount={42} />
+              <AudioWaveform isRecording={true} audioLevels={audioLevels} />
             </View>
-            
-            {/* Timer */}
             <View className="absolute bottom-6 right-16 items-center">
               <Text className="text-xs font-roobert-medium text-foreground/50">
-                {formatDuration(recordingDuration)}
+                {recordingStatusText}
               </Text>
             </View>
             
@@ -340,8 +343,8 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
                   cancelScale.value = withSpring(1, { damping: 15, stiffness: 400 });
                 }}
                 onPress={onCancelRecording}
-                className="bg-secondary rounded-full items-center justify-center"
-                style={[{ width: 33.75, height: 33.75 }, cancelAnimatedStyle]}
+                className="bg-primary/5 rounded-full items-center justify-center"
+                style={[{ width: 40, height: 40 }, cancelAnimatedStyle]}
               >
                 <Icon 
                   as={X} 
@@ -361,11 +364,11 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
                 }}
                 onPress={handleSendAudioMessage}
                 className="bg-primary rounded-full items-center justify-center"
-                style={[{ width: 33.75, height: 33.75 }, stopAnimatedStyle]}
+                style={[{ width: 40, height: 40 }, stopAnimatedStyle]}
               >
                 <Icon 
                   as={CornerDownLeft} 
-                  size={15} 
+                  size={16} 
                   className="text-primary-foreground"
                   strokeWidth={2}
                 />
@@ -394,7 +397,7 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
                   }
                   multiline
                   scrollEnabled={false}
-                  editable={!isSendingMessage && !isAgentRunning}
+                  editable={!isSendingMessage && !isAgentRunning && !isTranscribing}
                   onContentSizeChange={(e) => {
                     const newHeight = e.nativeEvent.contentSize.height;
                     // Only log significant changes (every 50px)
@@ -408,7 +411,7 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
                   style={{ 
                     fontFamily: 'Roobert-Regular',
                     minHeight: 52,
-                    opacity: isSendingMessage || isAgentRunning ? 0.5 : 1,
+                    opacity: isSendingMessage || isAgentRunning || isTranscribing ? 0.5 : 1,
                   }}
                 />
               </ScrollView>
@@ -427,16 +430,16 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
                     attachScale.value = withSpring(1, { damping: 15, stiffness: 400 });
                   }}
                   onPress={onAttachPress}
-                  disabled={isSendingMessage || isAgentRunning}
-                  className="bg-primary/5 rounded-full w-9 h-9 items-center justify-center border border-border/30"
+                  disabled={isSendingMessage || isAgentRunning || isTranscribing}
+                  className="bg-primary/5 rounded-full w-10 h-10 items-center justify-center"
                   style={[
                     attachAnimatedStyle,
-                    { opacity: isSendingMessage || isAgentRunning ? 0.4 : 1 }
+                    { opacity: isSendingMessage || isAgentRunning || isTranscribing ? 0.4 : 1 }
                   ]}
                 >
                   <Icon 
                     as={Paperclip} 
-                    size={15} 
+                    size={16} 
                     className="text-foreground"
                   />
                 </AnimatedPressable>
@@ -448,12 +451,12 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
                       console.log('❌ Clearing quick action context');
                       onClearQuickAction?.();
                     }}
-                    className="bg-primary/10 rounded-full flex-row items-center h-9 px-2 border border-primary/20 active:opacity-70"
+                    className="bg-primary/5 rounded-full flex-row items-center h-10 px-3 active:opacity-70"
                   >
                     <Icon 
                       as={QuickActionIcon} 
-                      size={15} 
-                      className="text-primary mr-1"
+                      size={16} 
+                      className="text-primary mr-1.5"
                       strokeWidth={2}
                     />
                     <Icon 
@@ -480,19 +483,19 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
                     sendScale.value = withSpring(1, { damping: 15, stiffness: 400 });
                   }}
                   onPress={handleButtonPress}
-                  disabled={isSendingMessage}
+                  disabled={isSendingMessage || isTranscribing}
                   className={`rounded-full items-center justify-center ${
                     isAgentRunning 
-                      ? 'bg-destructive' 
+                      ? 'bg-foreground' 
                       : 'bg-primary'
                   }`}
-                  style={[{ width: 33.75, height: 33.75 }, sendAnimatedStyle]}
+                  style={[{ width: 40, height: 40 }, sendAnimatedStyle]}
                 >
-                  {isSendingMessage ? (
+                  {isSendingMessage || isTranscribing ? (
                     <AnimatedView style={rotationAnimatedStyle}>
                       <Icon 
                         as={Loader2}
-                        size={15} 
+                        size={16} 
                         className="text-primary-foreground"
                         strokeWidth={2}
                       />
@@ -506,8 +509,8 @@ export const ChatInput = React.forwardRef<ChatInputRef, ChatInputProps>(({
                             ? CornerDownLeft 
                             : AudioLines
                       } 
-                      size={isAgentRunning ? 12 : 15} 
-                      className="text-primary-foreground"
+                      size={isAgentRunning ? 14 : 16} 
+                      className={isAgentRunning ? "text-background" : "text-primary-foreground"}
                       strokeWidth={2}
                     />
                   )}

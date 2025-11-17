@@ -1,8 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useTrialStatus } from '@/hooks/react-query/billing/use-trial-status';
-import { useCancelTrial } from '@/hooks/react-query/billing/use-cancel-trial';
+import { useTrialStatus, useCancelTrial } from '@/hooks/billing';
 import { useAuth } from '@/components/AuthProvider';
 import {
   Card,
@@ -114,7 +113,7 @@ export function TrialManagement() {
                 </li>
               </ul>
               <p className="text-muted-foreground text-sm pt-2">
-                To continue using Suna after cancelling, you'll need to purchase a subscription.
+                To continue using Kortix after cancelling, you'll need to purchase a subscription.
               </p>
             </AlertDialogDescription>
           </AlertDialogHeader>

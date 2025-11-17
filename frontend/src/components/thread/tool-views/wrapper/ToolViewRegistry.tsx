@@ -6,7 +6,6 @@ import { CommandToolView } from '../command-tool/CommandToolView';
 import { CheckCommandOutputToolView } from '../command-tool/CheckCommandOutputToolView';
 import { ExposePortToolView } from '../expose-port-tool/ExposePortToolView';
 import { FileOperationToolView } from '../file-operation/FileOperationToolView';
-import { FileEditToolView } from '../file-operation/FileEditToolView';
 import { StrReplaceToolView } from '../str-replace/StrReplaceToolView';
 import { WebCrawlToolView } from '../WebCrawlToolView';
 import { WebScrapeToolView } from '../web-scrape-tool/WebScrapeToolView';
@@ -45,6 +44,7 @@ import { DeleteSlideToolView } from '../presentation-tools/DeleteSlideToolView';
 import { DeletePresentationToolView } from '../presentation-tools/DeletePresentationToolView';
 // import { PresentationStylesToolView } from '../presentation-tools/PresentationStylesToolView';
 import { PresentPresentationToolView } from '../presentation-tools/PresentPresentationToolView';
+import { ExportToPptxToolView, ExportToPdfToolView } from '../presentation-tools/ExportToolView';
 import { SheetsToolView } from '../sheets-tools/sheets-tool-view';
 import { GetProjectStructureView } from '../web-dev/GetProjectStructureView';
 import { ImageEditGenerateToolView } from '../image-edit-generate-tool/ImageEditGenerateToolView';
@@ -92,7 +92,7 @@ const defaultRegistry: ToolViewRegistryType = {
   'delete-file': FileOperationToolView,
   'full-file-rewrite': FileOperationToolView,
   'read-file': FileOperationToolView,
-  'edit-file': FileEditToolView,
+  'edit-file': FileOperationToolView,
 
   'parse-document': DocumentParserToolView,
 
@@ -146,7 +146,8 @@ const defaultRegistry: ToolViewRegistryType = {
 
 
   'create-presentation-outline': PresentationOutlineToolView,
-  'list-presentation-templates': ListPresentationTemplatesToolView,
+  'list-templates': ListPresentationTemplatesToolView,
+  'load-template-design': ListPresentationTemplatesToolView,
 
   // New per-slide presentation tools
   'create-slide': PresentationViewer,
@@ -157,6 +158,8 @@ const defaultRegistry: ToolViewRegistryType = {
   'validate-slide': PresentationViewer,
   // 'presentation-styles': PresentationStylesToolView,
   'present-presentation': PresentPresentationToolView,
+  'export-to-pptx': ExportToPptxToolView,
+  'export-to-pdf': ExportToPdfToolView,
 
   'create-sheet': SheetsToolView,
   'update-sheet': SheetsToolView,

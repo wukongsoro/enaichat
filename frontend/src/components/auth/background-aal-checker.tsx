@@ -2,7 +2,7 @@
 
 import { useEffect } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
-import { useGetAAL } from '@/hooks/react-query/phone-verification';
+import { useGetAAL } from '@/hooks/auth';
 import { useAuth } from '@/components/AuthProvider';
 
 interface BackgroundAALCheckerProps {
@@ -62,7 +62,10 @@ export function BackgroundAALChecker({
       switch (action_required) {
         case 'verify_mfa':
           // User has MFA enrolled but needs to verify it
-          router.push(redirectTo);
+          // Only redirect if phone verification is mandatory (respects env var)
+          if (verification_required) {
+            router.push(redirectTo);
+          }
           break;
         
         case 'reauthenticate':

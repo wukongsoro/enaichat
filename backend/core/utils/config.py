@@ -80,8 +80,8 @@ class Configuration:
     
     # Environment mode
     ENV_MODE: Optional[EnvMode] = EnvMode.LOCAL
-    
-    
+
+
     # Subscription tier IDs - Production
     STRIPE_FREE_TIER_ID_PROD: Optional[str] = 'price_1RILb4G6l1KZGqIrK4QLrx9i'
     STRIPE_TIER_2_20_ID_PROD: Optional[str] = 'price_1RILb4G6l1KZGqIrhomjgDnO'
@@ -306,7 +306,10 @@ class Configuration:
     OPENAI_COMPATIBLE_API_KEY: Optional[str] = None
     OPENAI_COMPATIBLE_API_BASE: Optional[str] = None
     OR_SITE_URL: Optional[str] = "https://kortix.ai"
-    OR_APP_NAME: Optional[str] = "Kortix AI"    
+    OR_APP_NAME: Optional[str] = "Kortix AI"
+    
+    # Frontend URL configuration
+    FRONTEND_URL_ENV: Optional[str] = None
     
     # AWS Bedrock authentication
     AWS_BEARER_TOKEN_BEDROCK: Optional[str] = None
@@ -356,8 +359,8 @@ class Configuration:
     STRIPE_PRODUCT_ID_STAGING: Optional[str] = 'prod_SCgIj3G7yPOAWY'
     
     # Sandbox configuration
-    SANDBOX_IMAGE_NAME = "kortix/suna:0.1.3.23"
-    SANDBOX_SNAPSHOT_NAME = "kortix/suna:0.1.3.23"
+    SANDBOX_IMAGE_NAME = "kortix/suna:0.1.3.24"
+    SANDBOX_SNAPSHOT_NAME = "kortix/suna:0.1.3.24"
     SANDBOX_ENTRYPOINT = "/usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf"
 
     # LangFuse configuration
@@ -382,6 +385,7 @@ class Configuration:
     # Webhook configuration
     WEBHOOK_BASE_URL: Optional[str] = None
     TRIGGER_WEBHOOK_SECRET: Optional[str] = None
+    SUPABASE_WEBHOOK_SECRET: Optional[str] = None  # Secret for Supabase database webhook authentication
     
     # Email configuration
     
@@ -468,6 +472,29 @@ class Configuration:
             return self.STRIPE_PRODUCT_ID_STAGING
         return self.STRIPE_PRODUCT_ID_PROD
     
+    @property
+    def FRONTEND_URL(self) -> str:
+        """
+        Get the frontend URL based on environment.
+        
+        Returns:
+        - Production: 'https://kortix.com' (or FRONTEND_URL_ENV if set)
+        - Staging: 'https://staging.kortix.com' (or FRONTEND_URL_ENV if set)
+        - Local: FRONTEND_URL_ENV or 'http://localhost:3000'
+        """
+        # Check for environment variable override first
+        if self.FRONTEND_URL_ENV:
+            return self.FRONTEND_URL_ENV
+        
+        # Environment-based defaults
+        if self.ENV_MODE == EnvMode.PRODUCTION:
+            return 'https://kortix.com'
+        elif self.ENV_MODE == EnvMode.STAGING:
+            return 'http://localhost:3000'
+            # return 'https://staging.suna.so'
+        else:
+            return 'http://localhost:3000'
+    
     def _generate_admin_api_key(self) -> str:
         """Generate a secure admin API key for Kortix administrative functions."""
         # Generate 32 random bytes and encode as hex for a readable API key
@@ -538,6 +565,11 @@ class Configuration:
         max_parallel_runs_env = os.getenv("MAX_PARALLEL_AGENT_RUNS")
         if max_parallel_runs_env is not None:
             self._MAX_PARALLEL_AGENT_RUNS_ENV = max_parallel_runs_env
+        
+        # Custom handling for frontend URL
+        frontend_url_env = os.getenv("FRONTEND_URL")
+        if frontend_url_env is not None:
+            self.FRONTEND_URL_ENV = frontend_url_env
     
     def _validate(self):
         """Validate configuration based on type hints."""

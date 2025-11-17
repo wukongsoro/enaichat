@@ -1,37 +1,39 @@
 import * as React from 'react';
-import { Pressable, ScrollView, TextInput, View, Keyboard, ActivityIndicator } from 'react-native';
+import { Pressable, ScrollView, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import Animated, { 
   useAnimatedStyle, 
   useSharedValue, 
-  withSpring,
-  withTiming,
-  interpolate,
-  Extrapolate
+  withSpring
 } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useColorScheme } from 'nativewind';
 import * as Haptics from 'expo-haptics';
 import { Text } from '@/components/ui/text';
 import { Icon } from '@/components/ui/icon';
+import { Button } from '@/components/ui/button';
 import { SearchBar } from '@/components/ui/SearchBar';
-import { Search, Plus, X, ChevronLeft, AlertCircle, MessageSquare, Users, Zap } from 'lucide-react-native';
+import { KortixLoader } from '@/components/ui';
+import { Search, Plus, X, AlertCircle, MessageSquare, Users, Zap } from 'lucide-react-native';
 import { ConversationSection } from '@/components/menu/ConversationSection';
 import { BottomNav } from '@/components/menu/BottomNav';
 import { ProfileSection } from '@/components/menu/ProfileSection';
-import { SettingsDrawer } from '@/components/menu/SettingsDrawer';
+import { SettingsPage } from '@/components/settings/SettingsPage';
+import { placeholderImageUrl } from '@/components/settings/NameEditPage';
 import { useAuthContext, useLanguage } from '@/contexts';
 import { useRouter } from 'expo-router';
-import { AgentAvatar } from '@/components/agents/AgentAvatar';
 import { AgentList } from '@/components/agents/AgentList';
 import { useAgent } from '@/contexts/AgentContext';
 import { useSearch } from '@/lib/utils/search';
 import { useThreads } from '@/lib/chat';
 import { useAllTriggers } from '@/lib/triggers';
 import { groupThreadsByMonth } from '@/lib/utils/thread-utils';
-import { TriggerCreationDrawer, TriggerListItem } from '@/components/triggers';
+import { TriggerCreationDrawer, TriggerList } from '@/components/triggers';
+import { useAdvancedFeatures } from '@/hooks';
+import { AnimatedPageWrapper } from '@/components/shared/AnimatedPageWrapper';
 import type { Conversation, UserProfile, ConversationSection as ConversationSectionType } from '@/components/menu/types';
 import type { Agent, TriggerWithAgent } from '@/api/types';
+import { ProfilePicture } from '../settings/ProfilePicture';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 const AnimatedScrollView = Animated.createAnimatedComponent(ScrollView);
@@ -116,7 +118,7 @@ function EmptyState({
   if (type === 'loading') {
     return (
       <View className="items-center justify-center py-16 px-8">
-        <ActivityIndicator size="large" color={colorScheme === 'dark' ? '#FFFFFF' : '#000000'} />
+        <KortixLoader size="large" />
         <Text className="text-muted-foreground text-sm font-roobert mt-4 text-center">
           {title}
         </Text>
@@ -126,19 +128,19 @@ function EmptyState({
   
   // All other states
   return (
-    <View className="items-center justify-center py-16 px-8">
-      <View className={`w-16 h-16 rounded-2xl ${iconBgColor} items-center justify-center mb-4`}>
+    <View className="items-center justify-center py-20 px-8">
+      <View className={`w-20 h-20 rounded-full ${iconBgColor} items-center justify-center mb-6`}>
         <Icon 
           as={icon}
-          size={32}
+          size={36}
           color={iconColor}
           strokeWidth={2}
         />
       </View>
-      <Text className="text-foreground text-lg font-roobert-semibold text-center">
+      <Text className="text-foreground text-xl font-roobert-semibold text-center tracking-tight mb-2">
         {title}
       </Text>
-      <Text className="text-muted-foreground text-sm font-roobert mt-2 text-center">
+      <Text className="text-muted-foreground text-sm font-roobert text-center leading-5">
         {description}
       </Text>
       {actionLabel && onActionPress && (
@@ -147,11 +149,17 @@ function EmptyState({
           onPressIn={handlePressIn}
           onPressOut={handlePressOut}
           style={animatedStyle}
-          className="mt-6 px-6 py-3 bg-primary rounded-xl"
+          className="mt-8 px-6 py-3.5 bg-primary rounded-full flex-row items-center gap-2"
           accessibilityRole="button"
           accessibilityLabel={actionLabel}
         >
-          <Text className="text-primary-foreground text-base font-roobert-medium">
+          <Icon 
+            as={Plus}
+            size={18}
+            className="text-primary-foreground"
+            strokeWidth={2.5}
+          />
+          <Text className="text-primary-foreground text-sm font-roobert-medium">
             {actionLabel}
           </Text>
         </AnimatedPressable>
@@ -163,8 +171,8 @@ function EmptyState({
 /**
  * BackButton Component
  * 
- * Elegant back button to close the menu and return to home
- * Uses ChevronLeft icon from Lucide
+ * Elegant close button to close the menu and return to home
+ * Uses X icon from Lucide
  */
 interface BackButtonProps {
   onPress?: () => void;
@@ -187,7 +195,7 @@ function BackButton({ onPress }: BackButtonProps) {
   };
   
   const handlePress = () => {
-    console.log('🎯 Back button pressed');
+    console.log('🎯 Close button pressed');
     console.log('📱 Returning to Home');
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     onPress?.();
@@ -199,31 +207,63 @@ function BackButton({ onPress }: BackButtonProps) {
       onPressIn={handlePressIn}
       onPressOut={handlePressOut}
       style={animatedStyle}
-      className="w-10 h-10 items-center justify-center"
+      className="w-10 h-10 rounded-full bg-primary/10 items-center justify-center active:bg-muted/50"
       accessibilityRole="button"
       accessibilityLabel={t('actions.goBack')}
       accessibilityHint={t('actions.returnToHome')}
     >
       <Icon 
-        as={ChevronLeft}
-        size={24}
+        as={X}
+        size={20}
         className="text-foreground"
-        strokeWidth={2}
+        strokeWidth={2.5}
       />
     </AnimatedPressable>
   );
 }
 
 
-/**
- * FloatingActionButton Component
- * 
- * Elegant floating action button for creating new items
- * - Circular design: 56x56px
- * - Positioned above bottom navigation
- * - Smooth shadow and haptic feedback
- * - Context-aware (Chat/Worker/Trigger based on active tab)
- */
+interface NewChatButtonProps {
+  onPress?: () => void;
+}
+
+function NewChatButton({ onPress }: NewChatButtonProps) {
+  const { t } = useLanguage();
+
+  const scale = useSharedValue(1);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
+
+  return (
+    <AnimatedPressable
+      style={animatedStyle}
+      onPress={() => {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        onPress?.();
+      }}
+      onPressIn={() => {
+        scale.value = withSpring(0.95, { damping: 15, stiffness: 400 });
+      }}
+      onPressOut={() => {
+        scale.value = withSpring(1, { damping: 15, stiffness: 400 });
+      }}
+      className="h-14 w-full rounded-full bg-primary flex-row items-center justify-center gap-2"
+    >
+      <Icon 
+        as={Plus}
+        size={20}
+        strokeWidth={2}
+        className="text-primary-foreground"
+      />
+      <Text className="text-primary-foreground font-roobert-medium">
+        {t('menu.newChat')}
+      </Text>
+    </AnimatedPressable>
+  );
+}
+
 interface FloatingActionButtonProps {
   activeTab: 'chats' | 'workers' | 'triggers';
   onChatPress?: () => void;
@@ -272,7 +312,6 @@ function FloatingActionButton({ activeTab, onChatPress, onWorkerPress, onTrigger
     return t('actions.createNew', { item });
   };
   
-  // Different background colors based on theme
   const bgColor = colorScheme === 'dark' ? '#FFFFFF' : '#121215';
   const iconColor = colorScheme === 'dark' ? '#121215' : '#FFFFFF';
   
@@ -284,14 +323,14 @@ function FloatingActionButton({ activeTab, onChatPress, onWorkerPress, onTrigger
       style={[
         animatedStyle,
         {
-          width: 56,
-          height: 56,
+          width: 60,
+          height: 60,
           backgroundColor: bgColor,
           shadowColor: '#000',
-          shadowOffset: { width: 0, height: 4 },
-          shadowOpacity: 0.3,
-          shadowRadius: 8,
-          elevation: 8,
+          shadowOffset: { width: 0, height: 6 },
+          shadowOpacity: 0.25,
+          shadowRadius: 12,
+          elevation: 10,
         }
       ]}
       className="absolute bottom-44 right-6 rounded-full items-center justify-center"
@@ -300,7 +339,7 @@ function FloatingActionButton({ activeTab, onChatPress, onWorkerPress, onTrigger
     >
       <Icon 
         as={Plus}
-        size={28}
+        size={26}
         color={iconColor}
         strokeWidth={2.5}
       />
@@ -370,7 +409,9 @@ export function MenuPage({
   const { user } = useAuthContext();
   const router = useRouter();
   const { agents } = useAgent();
+  const { isEnabled: advancedFeaturesEnabled } = useAdvancedFeatures();
   const scrollY = useSharedValue(0);
+  const profileScale = useSharedValue(1);
   const [isSettingsVisible, setIsSettingsVisible] = React.useState(false);
   const [isTriggerDrawerVisible, setIsTriggerDrawerVisible] = React.useState(false);
 
@@ -450,12 +491,25 @@ export function MenuPage({
     scrollY.value = event.nativeEvent.contentOffset.y;
   };
   
+  const profileAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: profileScale.value }],
+  }));
+
   /**
    * Handle profile press - Opens settings drawer
    */
   const handleProfilePress = () => {
     console.log('🎯 Opening settings drawer');
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setIsSettingsVisible(true);
+  };
+
+  const handleProfilePressIn = () => {
+    profileScale.value = withSpring(0.97, { damping: 15, stiffness: 400 });
+  };
+
+  const handleProfilePressOut = () => {
+    profileScale.value = withSpring(1, { damping: 15, stiffness: 400 });
   };
   
   /**
@@ -505,20 +559,55 @@ export function MenuPage({
       }}
     >
       <SafeAreaView edges={['top', 'bottom']} className="flex-1">
-        {/* Main Content Container */}
         <View className="flex-1 px-6 pt-2">
-          {/* Header: Profile (80%) + Back Button (20%) */}
           <View className="flex-row items-center justify-between mb-6">
-            <View className="flex-1 mr-4">
-              <ProfileSection
-                profile={profile}
-                onPress={handleProfilePress}
-              />
-            </View>
+            <AnimatedPressable 
+              onPress={handleProfilePress}
+              onPressIn={handleProfilePressIn}
+              onPressOut={handleProfilePressOut}
+              style={profileAnimatedStyle}
+              className="flex-row items-center gap-3"
+            >
+              <ProfilePicture imageUrl={placeholderImageUrl} size={12} />
+              <View className="flex-col items-start -mt-1.5">
+                <Text className="text-lg font-roobert-semibold text-foreground">
+                  {profile.name || 'User'}
+                </Text>
+                <Text className="text-sm font-roobert text-muted-foreground">
+                  {profile.email || 'Tap to open settings'}
+                </Text>
+              </View>
+            </AnimatedPressable>
             <BackButton onPress={onClose} />
           </View>
           
-          {/* Scrollable Content Area with Bottom Blur */}
+          <View className="mb-4">
+            {activeTab === 'chats' && (
+              <SearchBar
+                value={chatsSearch.query}
+                onChangeText={chatsSearch.updateQuery}
+                placeholder={t('menu.searchConversations') || 'Search chats...'}
+                onClear={chatsSearch.clearSearch}
+              />
+            )}
+            {activeTab === 'workers' && (
+              <SearchBar
+                value={workersSearch.query}
+                onChangeText={workersSearch.updateQuery}
+                placeholder={t('placeholders.searchWorkers') || 'Search workers...'}
+                onClear={workersSearch.clearSearch}
+              />
+            )}
+            {activeTab === 'triggers' && (
+              <SearchBar
+                value={triggersSearch.query}
+                onChangeText={triggersSearch.updateQuery}
+                placeholder={t('placeholders.searchTriggers') || 'Search triggers...'}
+                onClear={triggersSearch.clearSearch}
+              />
+            )}
+          </View>
+          
           <View className="flex-1 relative -mx-6">
             <AnimatedScrollView 
               className="flex-1"
@@ -530,16 +619,6 @@ export function MenuPage({
             >
               {activeTab === 'chats' && (
                 <>
-                  {/* Chats Search Bar */}
-                  <View className="mb-4">
-                    <SearchBar
-                      value={chatsSearch.query}
-                      onChangeText={chatsSearch.updateQuery}
-                      placeholder={t('placeholders.searchChats') || 'Search chats...'}
-                      onClear={chatsSearch.clearSearch}
-                    />
-                  </View>
-                  
                   {isLoadingThreads ? (
                     <EmptyState
                       type="loading"
@@ -566,14 +645,12 @@ export function MenuPage({
                   ) : (
                     <View className="gap-8">
                       {sections.map((section) => {
-                        // Filter conversations based on search results
                         const filteredConversations = chatsSearch.isSearching 
                           ? section.conversations.filter(conv => 
                               chatsSearch.results.some(result => result.id === conv.id)
                             )
                           : section.conversations;
                         
-                        // Only show section if it has conversations after filtering
                         if (filteredConversations.length === 0 && chatsSearch.isSearching) {
                           return null;
                         }
@@ -590,7 +667,6 @@ export function MenuPage({
                         );
                       })}
                       
-                      {/* Show no results state if searching and no results */}
                       {chatsSearch.isSearching && 
                        sections.every(section => 
                          !section.conversations.some(conv => 
@@ -611,16 +687,6 @@ export function MenuPage({
               
               {activeTab === 'workers' && (
                 <>
-                  {/* Workers Search Bar */}
-                  <View className="mb-4">
-                    <SearchBar
-                      value={workersSearch.query}
-                      onChangeText={workersSearch.updateQuery}
-                      placeholder={t('placeholders.searchWorkers') || 'Search workers...'}
-                      onClear={workersSearch.clearSearch}
-                    />
-                  </View>
-                  
                   {agentResults.length === 0 && !workersSearch.isSearching ? (
                     <EmptyState
                       type="empty"
@@ -651,16 +717,6 @@ export function MenuPage({
               
               {activeTab === 'triggers' && (
                 <>
-                  {/* Triggers Search Bar */}
-                  <View className="mb-4">
-                    <SearchBar
-                      value={triggersSearch.query}
-                      onChangeText={triggersSearch.updateQuery}
-                      placeholder={t('placeholders.searchTriggers') || 'Search triggers...'}
-                      onClear={triggersSearch.clearSearch}
-                    />
-                  </View>
-                  
                   {triggersLoading ? (
                     <EmptyState
                       type="loading"
@@ -684,36 +740,26 @@ export function MenuPage({
                       actionLabel={t('menu.newTrigger') || 'Create Trigger'}
                       onActionPress={handleTriggerCreate}
                     />
-                  ) : triggerResults.length === 0 && triggersSearch.isSearching ? (
-                    <EmptyState
-                      type="no-results"
-                      icon={Search}
-                      title={t('emptyStates.noResults') || 'No results'}
-                      description={t('emptyStates.tryDifferentSearch') || 'Try a different search term'}
-                    />
                   ) : (
-                    <View className="gap-3">
-                      {triggerResults.map((trigger) => (
-                        <TriggerListItem
-                          key={trigger.trigger_id}
-                          trigger={trigger}
-                          onPress={(selectedTrigger) => {
-                            console.log('🔧 Trigger selected:', selectedTrigger.name);
-                            // Navigate to trigger detail page
-                            router.push({
-                              pathname: '/trigger-detail',
-                              params: { triggerId: selectedTrigger.trigger_id }
-                            });
-                          }}
-                        />
-                      ))}
-                    </View>
+                    <TriggerList
+                      triggers={triggerResults}
+                      isLoading={triggersLoading}
+                      error={triggersError}
+                      searchQuery={triggersSearch.query}
+                      onTriggerPress={(selectedTrigger) => {
+                        console.log('🔧 Trigger selected:', selectedTrigger.name);
+                        // Navigate to trigger detail page
+                        router.push({
+                          pathname: '/trigger-detail',
+                          params: { triggerId: selectedTrigger.trigger_id }
+                        });
+                      }}
+                    />
                   )}
                 </>
               )}
             </AnimatedScrollView>
             
-            {/* Bottom Blur Fade Effect - Reduced height for better visibility */}
             <View 
               className="absolute bottom-0 left-0 right-0 pointer-events-none"
               style={{ height: 70 }}
@@ -745,31 +791,38 @@ export function MenuPage({
           </View>
         </View>
         
-        {/* Bottom Section: Navigation (Elegant Layout) */}
         <View className="px-6 pb-4">
-          <BottomNav
-            activeTab={activeTab}
-            onChatsPress={onChatsPress}
-            onWorkersPress={onWorkersPress}
-            onTriggersPress={onTriggersPress}
-          />
+          {advancedFeaturesEnabled ? (
+            <BottomNav
+              activeTab={activeTab}
+              onChatsPress={onChatsPress}
+              onWorkersPress={onWorkersPress}
+              onTriggersPress={onTriggersPress}
+            />
+          ) : (
+            <NewChatButton onPress={onNewChat} />
+          )}
         </View>
       </SafeAreaView>
       
-      {/* Settings Drawer */}
-      <SettingsDrawer
-        visible={isSettingsVisible}
-        profile={profile}
-        onClose={handleCloseSettings}
-      />
+      {/* Settings Page */}
+      <AnimatedPageWrapper visible={isSettingsVisible} onClose={handleCloseSettings}>
+        <SettingsPage
+          visible={isSettingsVisible}
+          profile={profile}
+          onClose={handleCloseSettings}
+        />
+      </AnimatedPageWrapper>
       
       {/* Floating Action Button */}
-      <FloatingActionButton
-        activeTab={activeTab}
-        onChatPress={onNewChat}
-        onWorkerPress={onNewWorker}
-        onTriggerPress={handleTriggerCreate}
-      />
+      {advancedFeaturesEnabled && (
+        <FloatingActionButton
+          activeTab={activeTab}
+          onChatPress={onNewChat}
+          onWorkerPress={onNewWorker}
+          onTriggerPress={handleTriggerCreate}
+        />
+      )}
 
       {/* Trigger Creation Drawer */}
       <TriggerCreationDrawer

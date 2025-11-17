@@ -7,6 +7,31 @@ import { useMutation, useQuery, useQueryClient, type UseMutationOptions, type Us
 import { API_URL, getAuthToken } from '@/api/config';
 import type { SandboxFile, FileUploadResponse } from '@/api/types';
 
+// API response types (what the backend actually returns)
+interface ApiFileInfo {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+  mod_time: string;
+  permissions?: string;
+}
+
+interface ApiFilesResponse {
+  files: ApiFileInfo[];
+}
+
+// Transform API response to SandboxFile
+function transformApiFile(apiFile: ApiFileInfo): SandboxFile {
+  return {
+    name: apiFile.name,
+    path: apiFile.path,
+    type: apiFile.is_dir ? 'directory' : 'file',
+    size: apiFile.size,
+    modified: apiFile.mod_time,
+  };
+}
+
 // ============================================================================
 // Query Keys
 // ============================================================================
@@ -34,10 +59,13 @@ export function useSandboxFiles(
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error(`Failed to list files: ${res.status}`);
-      return res.json();
+      const data: ApiFilesResponse = await res.json();
+      // Transform API response to SandboxFile format
+      return data.files.map(transformApiFile);
     },
     enabled: !!sandboxId,
-    staleTime: 1 * 60 * 1000,
+    staleTime: 0,
+    gcTime: 0, 
     ...options,
   });
 }
@@ -137,7 +165,11 @@ export function useUploadFileToSandbox(
       return res.json();
     },
     onSuccess: (_, variables) => {
-      queryClient.invalidateQueries({ queryKey: fileKeys.sandboxFiles(variables.sandboxId, '/workspace') });
+      queryClient.invalidateQueries({ 
+        queryKey: ['files', 'sandbox', variables.sandboxId],
+        exact: false,           
+        refetchType: 'all',
+      });
     },
     ...options,
   });
@@ -189,7 +221,11 @@ export function useUploadMultipleFiles(
       return results;
     },
     onSuccess: (_, variables) => {
-      queryClient.invalidateQueries({ queryKey: fileKeys.sandboxFiles(variables.sandboxId, '/workspace') });
+      queryClient.invalidateQueries({ 
+        queryKey: ['files', 'sandbox', variables.sandboxId],
+        exact: false,
+        refetchType: 'all',
+      });
     },
     ...options,
   });
@@ -213,7 +249,11 @@ export function useDeleteSandboxFile(
       if (!res.ok) throw new Error(`Failed to delete file: ${res.status}`);
     },
     onSuccess: (_, variables) => {
-      queryClient.invalidateQueries({ queryKey: fileKeys.sandboxFiles(variables.sandboxId, '/workspace') });
+      queryClient.invalidateQueries({ 
+        queryKey: ['files', 'sandbox', variables.sandboxId],
+        exact: false,
+        refetchType: 'all',
+      });
     },
     ...options,
   });
@@ -238,7 +278,11 @@ export function useCreateSandboxDirectory(
       if (!res.ok) throw new Error(`Failed to create directory: ${res.status}`);
     },
     onSuccess: (_, variables) => {
-      queryClient.invalidateQueries({ queryKey: fileKeys.sandboxFiles(variables.sandboxId, '/workspace') });
+      queryClient.invalidateQueries({ 
+        queryKey: ['files', 'sandbox', variables.sandboxId],
+        exact: false,
+        refetchType: 'all',
+      });
     },
     ...options,
   });

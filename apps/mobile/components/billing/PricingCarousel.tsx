@@ -124,16 +124,19 @@ export function PricingCarousel({
             <View
               key={tier.id}
               style={{ width: CARD_WIDTH }}
-              className={`${isActive ? 'opacity-100' : 'opacity-40'}`}
             >
               <PricingTierCard
                 tier={tier}
                 displayPrice={displayPrice}
                 billingPeriod={billingPeriod}
-                isSelected={selectedPlan === tier.id}
-                onSelect={() => onSelectPlan(tier)}
-                disabled={selectedPlan === tier.id}
-                simplified={false}
+                currentSubscription={null}
+                isLoading={false}
+                isFetchingPlan={false}
+                onPlanSelect={() => {}}
+                onSubscribe={(tierKey) => onSelectPlan(tier)}
+                isAuthenticated={false}
+                currentBillingPeriod={null}
+                insideDialog={false}
                 t={t}
               />
             </View>

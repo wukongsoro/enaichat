@@ -12,14 +12,14 @@ import {
   type UseMutationOptions,
   type UseQueryOptions,
 } from '@tanstack/react-query';
-import { API_URL, getAuthToken, getAuthHeaders } from '@/api/config';
+import { Share } from 'react-native';
+import { API_URL, FRONTEND_SHARE_URL, getAuthHeaders, getAuthToken } from '@/api/config';
 import type {
   Thread,
   Message,
   AgentRun,
   SendMessageInput,
-  InitiateAgentInput,
-  InitiateAgentResponse,
+  UnifiedAgentStartResponse,
   ActiveAgentRun,
 } from '@/api/types';
 
@@ -77,7 +77,9 @@ export function useThread(
       return res.json();
     },
     enabled: !!threadId,
-    staleTime: 5 * 60 * 1000,
+    staleTime: 0, // Always refetch to get latest sandbox data
+    refetchOnMount: 'always', // Refetch sandbox on every mount
+    refetchOnWindowFocus: true, // Refetch when window gains focus
     ...options,
   });
 }
@@ -123,6 +125,43 @@ export function useDeleteThread(
     onSuccess: (_, threadId) => {
       queryClient.invalidateQueries({ queryKey: chatKeys.threads() });
       queryClient.removeQueries({ queryKey: chatKeys.thread(threadId) });
+    },
+    ...options,
+  });
+}
+
+export function useShareThread(
+  options?: UseMutationOptions<{ shareUrl: string }, Error, string>
+) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (threadId) => {
+      const headers = await getAuthHeaders();
+      
+      // Make thread public
+      const updateRes = await fetch(`${API_URL}/threads/${threadId}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ is_public: true }),
+      });
+      
+      if (!updateRes.ok) throw new Error(`Failed to share thread: ${updateRes.status}`);
+      
+      // Generate share URL using frontend URL
+      const shareUrl = `${FRONTEND_SHARE_URL}/share/${threadId}`;
+      
+      // Open native share menu
+      // Use message instead of url to prevent iOS duplication issue
+      await Share.share({
+        message: shareUrl,
+      });
+      
+      return { shareUrl };
+    },
+    onSuccess: (_, threadId) => {
+      queryClient.invalidateQueries({ queryKey: chatKeys.threads() });
+      queryClient.invalidateQueries({ queryKey: chatKeys.thread(threadId) });
     },
     ...options,
   });
@@ -187,36 +226,53 @@ export function useAddMessage(
   });
 }
 
-export function useStartAgent(
+/**
+ * Unified agent start hook - works for both new and existing threads
+ */
+export function useUnifiedAgentStart(
   options?: UseMutationOptions<
-    { agent_run_id: string; status: string },
+    { thread_id: string; agent_run_id: string; status: string },
     Error,
-    { threadId: string; modelName?: string; agentId?: string }
+    { threadId?: string; prompt?: string; files?: any[]; modelName?: string; agentId?: string }
   >
 ) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async ({ threadId, modelName, agentId }) => {
-      const headers = await getAuthHeaders();
+    mutationFn: async ({ threadId, prompt, files, modelName, agentId }) => {
+      const token = await getAuthToken();
+      if (!token) throw new Error('Authentication required');
 
-      const body: any = {};
-      if (modelName) body.model_name = modelName;
-      if (agentId) body.agent_id = agentId;
+      const formData = new FormData();
+      
+      if (threadId) formData.append('thread_id', threadId);
+      if (prompt) formData.append('prompt', prompt);
+      if (modelName) formData.append('model_name', modelName);
+      if (agentId) formData.append('agent_id', agentId);
+      
+      if (files?.length) {
+        files.forEach((file) => formData.append('files', file as any));
+      }
 
-      const res = await fetch(`${API_URL}/thread/${threadId}/agent/start`, {
+      const res = await fetch(`${API_URL}/agent/start`, {
         method: 'POST',
-        headers,
-        body: JSON.stringify(body),
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
       });
+
       if (!res.ok) {
         const error = await res.text().catch(() => 'Unknown error');
         throw new Error(`Failed to start agent: ${res.status} - ${error}`);
       }
+      
       return res.json();
     },
-    onSuccess: (_, variables) => {
-      queryClient.invalidateQueries({ queryKey: chatKeys.runs(variables.threadId) });
+    onSuccess: (data, variables) => {
+      queryClient.invalidateQueries({ queryKey: chatKeys.threads() });
+      queryClient.invalidateQueries({ queryKey: chatKeys.runs(data.thread_id) });
+      if (variables.threadId) {
+        queryClient.invalidateQueries({ queryKey: chatKeys.runs(variables.threadId) });
+      }
     },
     ...options,
   });
@@ -230,7 +286,7 @@ export function useSendMessage(
   >
 ) {
   const addMessage = useAddMessage();
-  const startAgent = useStartAgent();
+  const unifiedAgentStart = useUnifiedAgentStart();
 
   return useMutation({
     mutationFn: async (input) => {
@@ -244,7 +300,7 @@ export function useSendMessage(
       console.log('✅ [useSendMessage] Step 1 complete: Message added', message);
       console.log('🚀 [useSendMessage] Step 2: Starting agent run');
 
-      const agentRun = await startAgent.mutateAsync({
+      const agentRun = await unifiedAgentStart.mutateAsync({
         threadId: input.threadId,
         modelName: input.modelName,
         agentId: input.agentId,
@@ -387,8 +443,14 @@ export function useActiveAgentRuns(
         return [];
       }
     },
-    staleTime: 5 * 1000,
-    refetchInterval: 10000,
+    staleTime: 10 * 1000, // Cache for 10 seconds
+    refetchInterval: (query) => {
+      // Smart polling: only poll every 15 seconds if there are active runs
+      const hasActiveRuns = query.state.data && query.state.data.length > 0;
+      return hasActiveRuns ? 15000 : false;
+    },
+    retry: 1,
+    retryDelay: 5000,
     ...options,
   });
 }
@@ -437,44 +499,3 @@ export function useStopAgentRun(
     ...options,
   });
 }
-
-export function useInitiateAgent(
-  options?: UseMutationOptions<InitiateAgentResponse, Error, InitiateAgentInput>
-) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async (input) => {
-      const token = await getAuthToken();
-      if (!token) throw new Error('Authentication required');
-
-      const formData = new FormData();
-      formData.append('prompt', input.prompt);
-
-      if (input.agent_id) formData.append('agent_id', input.agent_id);
-      if (input.model_name) formData.append('model_name', input.model_name);
-      if (input.files?.length) {
-        input.files.forEach((file) => formData.append('files', file));
-      }
-
-      const res = await fetch(`${API_URL}/agent/initiate`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
-      });
-
-      if (!res.ok) {
-        const error = await res.text().catch(() => 'Unknown error');
-        throw new Error(`Failed to initiate agent: ${res.status} - ${error}`);
-      }
-
-      return res.json();
-    },
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: chatKeys.threads() });
-      queryClient.setQueryData(chatKeys.thread(data.thread_id), data);
-    },
-    ...options,
-  });
-}
-

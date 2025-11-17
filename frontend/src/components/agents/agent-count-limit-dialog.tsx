@@ -3,7 +3,7 @@
 import React from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { UpgradeDialog } from '@/components/ui/upgrade-dialog';
-import { PricingSection } from '@/components/home/sections/pricing-section';
+import { PricingSection } from '@/components/billing/pricing';
 
 interface AgentCountLimitDialogProps {
   open: boolean;
@@ -32,7 +32,7 @@ export const AgentCountLimitDialog: React.FC<AgentCountLimitDialogProps> = ({
     } else if (tierName.includes('tier_2_20')) {
       return {
         name: 'Pro',
-        price: '$50/month', 
+        price: '$50/month',
         agentLimit: 20,
       };
     } else if (tierName.includes('tier_6_50')) {
@@ -56,15 +56,16 @@ export const AgentCountLimitDialog: React.FC<AgentCountLimitDialogProps> = ({
       description="You've reached the maximum number of agents allowed on your current plan."
       theme="warning"
       size="xl"
-      className="[&_.grid]:!grid-cols-4 [&_.grid]:gap-3 mt-8"
+      contentClassName="w-full max-w-full pb-4"
     >
-      <PricingSection 
-        returnUrl={returnUrl} 
-        showTitleAndTabs={false} 
-        insideDialog={true} 
-        showInfo={false}
-        noPadding={true}
-      />
+      <div className="w-full">
+        <PricingSection
+          returnUrl={returnUrl}
+          showTitleAndTabs={false}
+          insideDialog={true}
+          noPadding={true}
+        />
+      </div>
     </UpgradeDialog>
   );
 }; 

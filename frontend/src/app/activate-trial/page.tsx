@@ -3,41 +3,45 @@
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Sparkles, CreditCard, Zap, Shield, ArrowRight, CheckCircle, Loader2, Clock, XCircle, LogOut } from 'lucide-react';
+import { Sparkles, CreditCard, Zap, Shield, ArrowRight, CheckCircle, Clock, XCircle, LogOut, Loader2 } from 'lucide-react';
+import { KortixLoader } from '@/components/ui/kortix-loader';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
 import { useState, useEffect } from 'react';
-import { useTrialStatus, useStartTrial } from '@/hooks/react-query/billing/use-trial-status';
-import { useSubscription } from '@/hooks/react-query/use-billing-v2';
+import { useTrialStatus, useStartTrial, useSubscription } from '@/hooks/billing';
 import { Skeleton } from '@/components/ui/skeleton';
 import { KortixLogo } from '@/components/sidebar/kortix-logo';
 import Link from 'next/link';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { createClient } from '@/lib/supabase/client';
 import { clearUserLocalStorage } from '@/lib/utils/clear-local-storage';
-import { useMaintenanceNoticeQuery } from '@/hooks/react-query/edge-flags';
-import { MaintenanceAlert } from '@/components/maintenance-alert';
+import { useMaintenanceNoticeQuery } from '@/hooks/edge-flags';
 import { useAuth } from '@/components/AuthProvider';
+import { MaintenancePage } from '@/components/maintenance/maintenance-page';
+import { useAdminRole } from '@/hooks/admin';
 
 export default function ActivateTrialPage() {
   const router = useRouter();
   const { user } = useAuth();
-  const { data: subscription, isLoading: isLoadingSubscription } = useSubscription(!!user);
+  const { data: subscription, isLoading: isLoadingSubscription } = useSubscription({ enabled: !!user });
   const { data: trialStatus, isLoading: isLoadingTrial } = useTrialStatus(!!user);
   const startTrialMutation = useStartTrial();
   const { data: maintenanceNotice, isLoading: maintenanceLoading } = useMaintenanceNoticeQuery();
+  const { data: adminRoleData, isLoading: isCheckingAdminRole } = useAdminRole();
+  const isAdmin = adminRoleData?.isAdmin ?? false;
 
   useEffect(() => {
     if (!isLoadingSubscription && !isLoadingTrial && subscription && trialStatus) {
       const hasActiveTrial = trialStatus.has_trial && trialStatus.trial_status === 'active';
-      const hasUsedTrial = trialStatus.trial_status === 'used' || 
-                           trialStatus.trial_status === 'expired' || 
-                           trialStatus.trial_status === 'cancelled' ||
-                           trialStatus.trial_status === 'converted';
-      const hasActiveSubscription = subscription.tier && 
-                                   subscription.tier.name !== 'none' && 
-                                   subscription.tier.name !== 'free';
+      const hasUsedTrial = trialStatus.trial_status === 'used' ||
+        trialStatus.trial_status === 'expired' ||
+        trialStatus.trial_status === 'cancelled' ||
+        trialStatus.trial_status === 'converted';
       
+      // ✅ Use tier_key and allow free tier
+      const tierKey = subscription.tier_key || subscription.tier?.name;
+      const hasActiveSubscription = tierKey && tierKey !== 'none';
+
       if (hasActiveTrial || hasActiveSubscription) {
         router.push('/dashboard');
       } else if (hasUsedTrial) {
@@ -52,7 +56,7 @@ export default function ActivateTrialPage() {
         success_url: `${window.location.origin}/dashboard?trial=started`,
         cancel_url: `${window.location.origin}/activate-trial`,
       });
-      
+
       if (result.checkout_url) {
         window.location.href = result.checkout_url;
       }
@@ -69,18 +73,18 @@ export default function ActivateTrialPage() {
     router.push('/auth');
   };
 
-  const isMaintenanceLoading = maintenanceLoading;
+  const isMaintenanceLoading = maintenanceLoading || isCheckingAdminRole;
 
   if (isMaintenanceLoading) {
     return (
       <div className="min-h-screen bg-gradient-to-b from-background to-muted/20 flex items-center justify-center p-4">
-        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        <KortixLoader size="large" />
       </div>
     );
   }
 
-  if (maintenanceNotice?.enabled) {
-    return <MaintenanceAlert open={true} onOpenChange={() => {}} closeable={false} />;
+  if (maintenanceNotice?.enabled && !isAdmin) {
+    return <MaintenancePage/>;
   }
 
   const isLoading = isLoadingSubscription || isLoadingTrial;
@@ -88,7 +92,7 @@ export default function ActivateTrialPage() {
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-background to-muted/20">
-        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        <KortixLoader size="large" />
       </div>
     );
   }
@@ -109,8 +113,8 @@ export default function ActivateTrialPage() {
       <Card className="w-full max-w-2xl border-2 shadow-none bg-transparent border-none">
         <CardHeader className="text-center space-y-4">
           <div>
-            <CardTitle className="text-2xl font-bold flex items-center justify-center gap-2">
-              <KortixLogo/>
+            <CardTitle className="text-2xl font-medium flex items-center justify-center gap-2">
+              <KortixLogo />
               <span>Welcome to Suna</span>
             </CardTitle>
             <CardDescription className="mt-2">
@@ -125,7 +129,7 @@ export default function ActivateTrialPage() {
               <Zap className="h-5 w-5 text-primary" />
               What's included in trial:
             </h3>
-            
+
             <div className="grid md:grid-cols-2 gap-4">
               <div className="flex items-start gap-3">
                 <CheckCircle className="h-5 w-5 text-green-500 mt-0.5 flex-shrink-0" />
@@ -149,7 +153,7 @@ export default function ActivateTrialPage() {
               <div className="space-y-1">
                 <p className="font-medium">No charge during trial</p>
                 <p className="text-sm text-muted-foreground">
-                  Your card will only be charged after 7 days if you don't cancel. 
+                  Your card will only be charged after 7 days if you don't cancel.
                   You can cancel anytime from your billing settings.
                 </p>
               </div>
@@ -157,7 +161,7 @@ export default function ActivateTrialPage() {
           </div>
 
           <div className="flex flex-col gap-3">
-            <Button 
+            <Button
               onClick={handleStartTrial}
               disabled={startTrialMutation.isPending}
               className="w-full"

@@ -8,7 +8,7 @@
 build, manage, and train sophisticated AI agents for any use case. Create powerful agents that act autonomously on your behalf, from general-purpose assistants to specialized automation tools.
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue)](./license)
-[![Discord Follow](https://dcbadge.limes.pink/api/server/Py6pCBUUPw?style=flat)](https://discord.gg/Py6pCBUUPw)
+[![Discord Follow](https://dcbadge.limes.pink/api/server/Py6pCBUUPw?style=flat)](https://discord.gg/RvFhXUdZ9H)
 [![Twitter Follow](https://img.shields.io/twitter/follow/kortixai)](https://x.com/kortixai)
 [![GitHub Repo stars](https://img.shields.io/github/stars/kortix-ai/suna)](https://github.com/kortix-ai/suna)
 [![Issues](https://img.shields.io/github/issues/kortix-ai/suna)](https://github.com/kortix-ai/suna/labels/bug)
@@ -166,34 +166,7 @@ That's it! Your Kortix platform will be running with Suna ready to assist you.
 
 ## 🏠 Self-Hosting
 
-Kortix can be self-hosted on your own infrastructure using our comprehensive setup wizard, giving you complete control over your AI agent platform. For a complete guide to self-hosting Kortix, please refer to our [Self-Hosting Guide](./docs/SELF-HOSTING.md).
-
-### 🔧 Setup Process Includes
-
-- **🏗️ Infrastructure**: Supabase project setup for database and authentication
-- **⚡ Performance**: Redis configuration for caching and session management
-- **🛡️ Security**: Daytona setup for secure agent execution environments
-- **🤖 AI Integration**: LLM providers (Anthropic, OpenAI, OpenRouter, etc.)
-- **🌐 Web Capabilities**: Search and scraping (Tavily, Firecrawl)
-- **📋 Workflows**: Background job processing
-- **🔗 Automation**: Webhook handling for automated tasks
-- **📊 Data Sources**: Optional RapidAPI integrations
-
-### 📚 Manual Setup
-
-For advanced users who prefer manual configuration, see the [Self-Hosting Guide](./docs/SELF-HOSTING.md) for detailed manual setup instructions.
-
-The wizard will guide you through all necessary steps to get your Kortix platform up and running. For detailed instructions, troubleshooting tips, and advanced configuration options, see the [Self-Hosting Guide](./docs/SELF-HOSTING.md).
-
-## 🤝 Contributing
-
-We welcome contributions from the community! Whether you're fixing bugs, adding features, or improving documentation, your help makes Kortix better for everyone.
-
-Please see our [Contributing Guide](./CONTRIBUTING.md) for more details on:
-- How to set up your development environment
-- Code style and standards
-- Pull request process
-- Community guidelines
+Just use "setup.py". Ty mate.
 
 ## 📄 License
 
@@ -205,6 +178,6 @@ Kortix is licensed under the Apache License, Version 2.0. See [LICENSE](./LICENS
 
 **Ready to build your first AI agent?** 
 
-[Get Started](./docs/SELF-HOSTING.md) • [Join Discord](https://discord.gg/Py6pCBUUPw) • [Follow on Twitter](https://x.com/kortixai)
+[Get Started](./docs/SELF-HOSTING.md) • [Join Discord](https://discord.gg/RvFhXUdZ9H) • [Follow on Twitter](https://x.com/kortix)
 
 </div>

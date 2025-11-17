@@ -1,6 +1,6 @@
 'use client';
 
-import { Project } from '@/lib/api';
+import { Project } from '@/lib/api/projects';
 import { getToolIcon, getUserFriendlyToolName } from '@/components/thread/utils';
 import React, { memo, useMemo, useCallback } from 'react';
 import { Slider } from '@/components/ui/slider';
@@ -8,7 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { ApiMessageType } from '@/components/thread/types';
 import { CircleDashed, X, ChevronLeft, ChevronRight, Computer, Minimize2, Globe, Wrench } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { useIsMobile } from '@/hooks/use-mobile';
+import { useIsMobile } from '@/hooks/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ToolView } from './tool-views/wrapper';
@@ -23,7 +23,7 @@ import {
   DrawerHeader,
   DrawerTitle,
 } from '@/components/ui/drawer';
-import { useDocumentModalStore } from '@/lib/stores/use-document-modal-store';
+import { useDocumentModalStore } from '@/stores/use-document-modal-store';
 
 export interface ToolCallInput {
   assistantCall: {
@@ -770,10 +770,10 @@ export function ToolCallSidePanel({
               </div>
               <div className="space-y-2">
                 <h3 className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
-                  No tool activity
+                  No actions yet
                 </h3>
                 <p className="text-sm text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                  Tool calls and computer interactions will appear here when they're being executed.
+                  Worker actions and results will appear here as they execute
                 </p>
               </div>
             </div>

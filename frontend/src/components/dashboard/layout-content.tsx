@@ -3,25 +3,32 @@
 import { useEffect } from 'react';
 import { SidebarLeft, FloatingMobileMenuButton } from '@/components/sidebar/sidebar-left';
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
-import { useAccounts } from '@/hooks/use-accounts';
+import { useAccounts } from '@/hooks/account';
 import { useAuth } from '@/components/AuthProvider';
-import { useMaintenanceNoticeQuery } from '@/hooks/react-query/edge-flags';
+import { useMaintenanceNoticeQuery } from '@/hooks/edge-flags';
 import { useRouter } from 'next/navigation';
-import { Loader2 } from 'lucide-react';
-import { useApiHealth } from '@/hooks/react-query';
+import { KortixLoader } from '@/components/ui/kortix-loader';
+import { useApiHealth } from '@/hooks/usage/use-health';
 import { MaintenancePage } from '@/components/maintenance/maintenance-page';
-import { DeleteOperationProvider } from '@/contexts/DeleteOperationContext';
+import { useDeleteOperationEffects } from '@/stores/delete-operation-store';
 import { StatusOverlay } from '@/components/ui/status-overlay';
+import { useAdminRole } from '@/hooks/admin';
 
-import { useProjects, useThreads } from '@/hooks/react-query/sidebar/use-sidebar';
-import { useIsMobile } from '@/hooks/use-mobile';
-import { useAgents } from '@/hooks/react-query/agents/use-agents';
-import { SubscriptionProvider } from '@/contexts/SubscriptionContext';
-import { MaintenanceAlert } from '../maintenance-alert';
+import { useProjects, useThreads } from '@/hooks/sidebar/use-sidebar';
+import { useIsMobile } from '@/hooks/utils';
+import { useAgents } from '@/hooks/agents/use-agents';
+import { SubscriptionStoreSync } from '@/stores/subscription-store';
+import { PresentationViewerWrapper } from '@/stores/presentation-viewer-store';
 import { OnboardingProvider } from '@/components/onboarding/onboarding-provider';
 
 interface DashboardLayoutContentProps {
   children: React.ReactNode;
+}
+
+// Wrapper component to handle delete operation side effects
+function DeleteOperationEffectsWrapper({ children }: { children: React.ReactNode }) {
+  useDeleteOperationEffects();
+  return <>{children}</>;
 }
 
 export default function DashboardLayoutContent({
@@ -47,13 +54,8 @@ export default function DashboardLayoutContent({
     sort_order: 'asc'
   });
 
-  useEffect(() => {
-    if (maintenanceNotice?.enabled) {
-      // setShowMaintenanceAlert(true); // This line was removed
-    } else {
-      // setShowMaintenanceAlert(false); // This line was removed
-    }
-  }, [maintenanceNotice]);
+  const { data: adminRoleData, isLoading: isCheckingAdminRole } = useAdminRole();
+  const isAdmin = adminRoleData?.isAdmin ?? false;
 
   // Log data prefetching for debugging
   useEffect(() => {
@@ -80,11 +82,13 @@ export default function DashboardLayoutContent({
 
   const mantenanceBanner: React.ReactNode | null = null;
 
-  // Show loading state while checking auth, health, or maintenance status
-  if (isLoading || isCheckingHealth || maintenanceLoading) {
+  // Show loading state only while checking auth (not maintenance status)
+  // Maintenance check now has placeholder data to prevent flash
+  // Health check errors should show the maintenance page, not infinite loading
+  if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
-        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        <KortixLoader size="large" />
       </div>
     );
   }
@@ -95,18 +99,23 @@ export default function DashboardLayoutContent({
   }
 
   // Show maintenance page if maintenance mode is enabled
-  if (maintenanceNotice?.enabled) {
-    return <MaintenanceAlert open={true} onOpenChange={() => {}} closeable={false} />;
+  // Only show if we have actual data (not placeholder) or if explicitly enabled
+  // Bypass maintenance for admins after role check completes
+  if (maintenanceNotice?.enabled && !maintenanceLoading && !isCheckingAdminRole && !isAdmin) {
+    return <MaintenancePage/>
   }
 
-  // Show maintenance page if API is not healthy (but not during initial loading)
-  if (!isCheckingHealth && !isApiHealthy) {
+  // Show maintenance page if API is not healthy OR if health check failed
+  // But only after initial check completes (not during loading with placeholder data)
+  // This prevents flash during navigation when placeholder data is being used
+  // Bypass for admins after role check completes
+  if (!isCheckingHealth && !isCheckingAdminRole && (!isApiHealthy || healthError) && !isAdmin) {
     return <MaintenancePage />;
   }
 
   return (
-    <DeleteOperationProvider>
-      <SubscriptionProvider>
+    <DeleteOperationEffectsWrapper>
+      <SubscriptionStoreSync>
         <OnboardingProvider>
           <SidebarProvider>
             <SidebarLeft />
@@ -130,12 +139,13 @@ export default function DashboardLayoutContent({
 
             {/* Status overlay for deletion operations */}
             <StatusOverlay />
-            
+
             {/* Floating mobile menu button */}
             <FloatingMobileMenuButton />
           </SidebarProvider>
         </OnboardingProvider>
-      </SubscriptionProvider>
-    </DeleteOperationProvider>
+        <PresentationViewerWrapper />
+      </SubscriptionStoreSync>
+    </DeleteOperationEffectsWrapper>
   );
 }

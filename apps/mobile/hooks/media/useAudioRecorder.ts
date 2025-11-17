@@ -1,22 +1,21 @@
-import { 
-  useAudioRecorder as useExpoAudioRecorder,
-  useAudioPlayer,
-  RecordingPresets,
-  requestRecordingPermissionsAsync,
-  setAudioModeAsync,
-} from 'expo-audio';
-import { useState, useRef } from 'react';
+import { Audio } from 'expo-av';
+import { useState, useRef, useEffect } from 'react';
 
 type RecorderState = 'idle' | 'recording' | 'recorded' | 'playing';
+
+const WAVEFORM_BARS = 45;
 
 export function useAudioRecorder() {
   const [state, setState] = useState<RecorderState>('idle');
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [audioUri, setAudioUri] = useState<string | null>(null);
+  const [audioLevel, setAudioLevel] = useState(0); // Single level for backward compat
+  const [audioLevels, setAudioLevels] = useState<number[]>(Array(WAVEFORM_BARS).fill(0)); // Time-series buffer
   
-  const audioRecorder = useExpoAudioRecorder(RecordingPresets.HIGH_QUALITY);
-  const audioPlayer = useAudioPlayer(audioUri || undefined);
+  const recordingRef = useRef<Audio.Recording | null>(null);
+  const playbackRef = useRef<Audio.Sound | null>(null);
   const durationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const meteringIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isRecording = state === 'recording';
   const isPlaying = state === 'playing';
@@ -25,23 +24,59 @@ export function useAudioRecorder() {
   const startRecording = async () => {
     try {
       console.log('🎤 Requesting audio permissions...');
-      const { granted } = await requestRecordingPermissionsAsync();
-      
-      if (!granted) {
-        console.log('❌ Audio permission denied');
-        setState('idle');
-        return;
-      }
+      await Audio.requestPermissionsAsync();
 
       console.log('🎤 Setting audio mode for recording...');
-      await setAudioModeAsync({
-        allowsRecording: true,
-        playsInSilentMode: true,
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
       });
 
-      console.log('🎤 Starting recording...');
-      audioRecorder.record();
+      // Wait a bit for audio mode to settle
+      await new Promise(resolve => setTimeout(resolve, 100));
 
+      // CRITICAL: Clean up any existing recording first
+      if (recordingRef.current) {
+        console.log('🧹 Cleaning up existing recording...');
+        try {
+          await recordingRef.current.stopAndUnloadAsync();
+        } catch (err) {
+          console.log('⚠️ Could not stop existing recording, continuing...');
+        }
+        recordingRef.current = null;
+        
+        // Reset audio mode to clear any lingering state
+        try {
+          await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
+          await new Promise(resolve => setTimeout(resolve, 50));
+          await Audio.setAudioModeAsync({
+            allowsRecordingIOS: true,
+            playsInSilentModeIOS: true,
+          });
+        } catch (err) {
+          console.log('⚠️ Could not reset audio mode:', err);
+        }
+        
+        // Wait a bit more after cleanup
+        await new Promise(resolve => setTimeout(resolve, 150));
+      }
+
+      console.log('🎤 Starting recording...');
+      const recording = new Audio.Recording();
+      
+      console.log('🎤 Preparing to record...');
+      // Enable metering for real-time audio levels
+      const recordingOptions = {
+        ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
+        isMeteringEnabled: true, // CRITICAL: Enable metering for waveform
+      };
+      
+      await recording.prepareToRecordAsync(recordingOptions);
+      
+      console.log('🎤 Starting async recording...');
+      await recording.startAsync();
+      
+      recordingRef.current = recording;
       setState('recording');
       setRecordingDuration(0);
 
@@ -50,31 +85,71 @@ export function useAudioRecorder() {
         setRecordingDuration((prev) => prev + 1);
       }, 1000);
 
-      console.log('✅ Recording started - State:', 'recording');
-      console.log('📊 Recorder isRecording:', audioRecorder.isRecording);
+      // Start REAL audio level monitoring using expo-av's built-in metering
+      meteringIntervalRef.current = setInterval(async () => {
+        if (recordingRef.current) {
+          try {
+            const status = await recordingRef.current.getStatusAsync();
+            if (status.isRecording && typeof status.metering === 'number') {
+              // status.metering is in decibels (dB)
+              // Typical range: -60 (quiet) to 0 (loud)
+              // We need to map this to 0-1 for visualization
+              const db = status.metering;
+              
+              // Improved normalization with less sensitivity
+              // -60 dB or lower = silence (0)
+              // -5 dB or higher = max volume (1)
+              const minDB = -60;
+              const maxDB = -5;
+              const normalizedLevel = Math.max(0, Math.min(1, (db - minDB) / (maxDB - minDB)));
+              
+              // Update single level for backward compatibility
+              setAudioLevel(normalizedLevel);
+              
+              // Update circular buffer - shift left and add new sample on right
+              setAudioLevels(prev => [...prev.slice(1), normalizedLevel]);
+            }
+          } catch (err) {
+            console.log('⚠️ Could not get metering status:', err);
+          }
+        }
+      }, 20); // Poll every 20ms for smooth, state-of-the-art updates
+
+      console.log('✅ Recording started - State: recording');
     } catch (error) {
       console.error('❌ Failed to start recording:', error);
-      // Clean up on error
+      
+      // Try to clean up the recording object
+      if (recordingRef.current) {
+        try {
+          await recordingRef.current.stopAndUnloadAsync();
+        } catch (cleanupErr) {
+          console.log('⚠️ Error during cleanup:', cleanupErr);
+        }
+        recordingRef.current = null;
+      }
+      
+      // Clean up intervals
       if (durationIntervalRef.current) {
         clearInterval(durationIntervalRef.current);
         durationIntervalRef.current = null;
       }
-      setState('idle');
-      // Try to reset audio mode
-      try {
-        await setAudioModeAsync({ allowsRecording: false });
-      } catch (modeError) {
-        console.warn('⚠️ Failed to reset audio mode after error:', modeError);
+      if (meteringIntervalRef.current) {
+        clearInterval(meteringIntervalRef.current);
+        meteringIntervalRef.current = null;
       }
+      
+      setAudioLevel(0);
+      setAudioLevels(Array(WAVEFORM_BARS).fill(0));
+      setState('idle');
+      
+      throw error;
     }
   };
 
   const stopRecording = async () => {
     console.log('🎤 Stopping recording...');
-    console.log('📊 Current state:', state);
-    console.log('📊 Recorder isRecording:', audioRecorder.isRecording);
     
-    // Check our local state instead of recorder state
     if (state !== 'recording') {
       console.log('❌ Not in recording state');
       return null;
@@ -86,37 +161,45 @@ export function useAudioRecorder() {
         clearInterval(durationIntervalRef.current);
         durationIntervalRef.current = null;
       }
-
-      // Stop the recorder if it's actually recording
-      if (audioRecorder.isRecording) {
-        await audioRecorder.stop();
+      
+      // Stop audio level monitoring
+      if (meteringIntervalRef.current) {
+        clearInterval(meteringIntervalRef.current);
+        meteringIntervalRef.current = null;
       }
       
-      // Reset audio mode after recording
-      try {
-        await setAudioModeAsync({
-          allowsRecording: false,
-        });
-      } catch (modeError) {
-        console.warn('⚠️ Failed to reset audio mode:', modeError);
+      setAudioLevel(0);
+      setAudioLevels(Array(WAVEFORM_BARS).fill(0));
+
+      // Stop and unload recording
+      if (recordingRef.current) {
+        console.log('🛑 Stopping recording...');
+        await recordingRef.current.stopAndUnloadAsync();
+        const uri = recordingRef.current.getURI();
+        console.log('✅ Recording stopped');
+        console.log('📊 Recording URI:', uri);
+        console.log('⏱️ Duration:', recordingDuration, 'seconds');
+
+        setAudioUri(uri);
+        setState('recorded');
+        recordingRef.current = null;
+        
+        return { uri, duration: recordingDuration };
       }
       
-      const uri = audioRecorder.uri;
-      console.log('✅ Recording stopped');
-      console.log('📊 Recording URI:', uri);
-      console.log('⏱️ Duration:', recordingDuration, 'seconds');
-
-      setAudioUri(uri);
-      setState('recorded');
-      
-      return { uri, duration: recordingDuration };
+      return null;
     } catch (error) {
       console.error('❌ Failed to stop recording:', error);
-      // Force state reset even on error
       if (durationIntervalRef.current) {
         clearInterval(durationIntervalRef.current);
         durationIntervalRef.current = null;
       }
+      if (meteringIntervalRef.current) {
+        clearInterval(meteringIntervalRef.current);
+        meteringIntervalRef.current = null;
+      }
+      setAudioLevel(0);
+      setAudioLevels(Array(WAVEFORM_BARS).fill(0));
       setState('idle');
       return null;
     }
@@ -125,7 +208,6 @@ export function useAudioRecorder() {
   const cancelRecording = async () => {
     console.log('🎤 Canceling recording...');
     
-    // Check our local state instead of recorder state
     if (state !== 'recording') {
       console.log('⚠️ Not recording, nothing to cancel');
       return;
@@ -137,19 +219,20 @@ export function useAudioRecorder() {
         clearInterval(durationIntervalRef.current);
         durationIntervalRef.current = null;
       }
-
-      // Stop the recorder if it's actually recording
-      if (audioRecorder.isRecording) {
-        await audioRecorder.stop();
+      
+      // Stop audio level monitoring
+      if (meteringIntervalRef.current) {
+        clearInterval(meteringIntervalRef.current);
+        meteringIntervalRef.current = null;
       }
       
-      // Reset audio mode after canceling
-      try {
-        await setAudioModeAsync({
-          allowsRecording: false,
-        });
-      } catch (modeError) {
-        console.warn('⚠️ Failed to reset audio mode:', modeError);
+      setAudioLevel(0);
+      setAudioLevels(Array(WAVEFORM_BARS).fill(0));
+
+      // Stop recording
+      if (recordingRef.current) {
+        await recordingRef.current.stopAndUnloadAsync();
+        recordingRef.current = null;
       }
 
       setState('idle');
@@ -159,11 +242,16 @@ export function useAudioRecorder() {
       console.log('✅ Recording canceled');
     } catch (error) {
       console.error('❌ Failed to cancel recording:', error);
-      // Force state reset even if stop fails
       if (durationIntervalRef.current) {
         clearInterval(durationIntervalRef.current);
         durationIntervalRef.current = null;
       }
+      if (meteringIntervalRef.current) {
+        clearInterval(meteringIntervalRef.current);
+        meteringIntervalRef.current = null;
+      }
+      setAudioLevel(0);
+      setAudioLevels(Array(WAVEFORM_BARS).fill(0));
       setState('idle');
       setRecordingDuration(0);
       setAudioUri(null);
@@ -179,7 +267,10 @@ export function useAudioRecorder() {
     try {
       console.log('▶️ Playing audio:', audioUri);
       
-      audioPlayer.play();
+      const { sound } = await Audio.Sound.createAsync({ uri: audioUri });
+      playbackRef.current = sound;
+      
+      await sound.playAsync();
       setState('playing');
 
       console.log('✅ Playback started');
@@ -190,16 +281,15 @@ export function useAudioRecorder() {
   };
 
   const pauseAudio = async () => {
-    if (!audioPlayer.playing) {
-      return;
-    }
-
     try {
-      console.log('⏸️ Pausing audio');
-      audioPlayer.pause();
-      setState('recorded');
+      if (playbackRef.current) {
+        console.log('⏸️ Pausing audio');
+        await playbackRef.current.pauseAsync();
+        setState('recorded');
+      }
     } catch (error) {
       console.error('❌ Failed to pause audio:', error);
+      setState('recorded');
     }
   };
 
@@ -215,12 +305,13 @@ export function useAudioRecorder() {
     console.log('🗑️ Deleting recording');
 
     // Clean up player
-    if (audioPlayer.playing) {
+    if (playbackRef.current) {
       try {
-        audioPlayer.pause();
+        await playbackRef.current.unloadAsync();
       } catch (error) {
-        console.error('❌ Failed to stop playback:', error);
+        console.log('⚠️ Player already cleaned up');
       }
+      playbackRef.current = null;
     }
 
     setState('idle');
@@ -231,7 +322,12 @@ export function useAudioRecorder() {
 
   const reset = async () => {
     console.log('🔄 Resetting audio recorder');
-    await deleteRecording();
+    
+    if (state !== 'idle' || audioUri) {
+      await deleteRecording();
+    } else {
+      console.log('⏭️ Already reset, skipping');
+    }
   };
 
   return {
@@ -241,6 +337,8 @@ export function useAudioRecorder() {
     hasRecording,
     recordingDuration,
     audioUri,
+    audioLevel,
+    audioLevels, // Time-series buffer for waveform
     state,
     
     // Recording controls
@@ -258,4 +356,3 @@ export function useAudioRecorder() {
     reset,
   };
 }
-

@@ -1047,9 +1047,9 @@ class SetupWizard:
         )
         print_info("Create a snapshot with these exact settings:")
         print_info(
-            f"   - Name:\t\t{Colors.GREEN}kortix/suna:0.1.3.23{Colors.ENDC}")
+            f"   - Name:\t\t{Colors.GREEN}kortix/suna:0.1.3.24{Colors.ENDC}")
         print_info(
-            f"   - Snapshot name:\t{Colors.GREEN}kortix/suna:0.1.3.23{Colors.ENDC}")
+            f"   - Snapshot name:\t{Colors.GREEN}kortix/suna:0.1.3.24{Colors.ENDC}")
         print_info(
             f"   - Entrypoint:\t{Colors.GREEN}/usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf{Colors.ENDC}"
         )
@@ -1472,6 +1472,17 @@ class SetupWizard:
         else:
             print_info(
                 "Found existing TRIGGER_WEBHOOK_SECRET. Keeping existing value.")
+
+        # Ensure a Supabase webhook secret exists for database triggers
+        if not self.env_vars["webhook"].get("SUPABASE_WEBHOOK_SECRET"):
+            print_info(
+                "Generating a secure SUPABASE_WEBHOOK_SECRET for Supabase database webhooks...")
+            self.env_vars["webhook"]["SUPABASE_WEBHOOK_SECRET"] = generate_webhook_secret()
+            print_success("Supabase webhook secret generated.")
+            print_info("This secret is used for welcome emails and other Supabase-triggered webhooks.")
+        else:
+            print_info(
+                "Found existing SUPABASE_WEBHOOK_SECRET. Keeping existing value.")
 
         print_success("Webhook configuration saved.")
 

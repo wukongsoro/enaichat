@@ -23,7 +23,7 @@ export interface Message {
 export interface UnifiedMessage {
   message_id: string | null; // null for transient stream chunks
   thread_id: string;
-  type: 'user' | 'assistant' | 'tool' | 'system' | 'status' | 'browser_state' | 'image_context';
+  type: 'user' | 'assistant' | 'tool' | 'system' | 'status' | 'browser_state' | 'image_context' | 'llm_response_end' | 'llm_response_start';
   is_llm_message: boolean;
   content: string; // JSON string from backend
   metadata: string; // JSON string from backend
@@ -31,6 +31,7 @@ export interface UnifiedMessage {
   updated_at: string;
   agent_id?: string;
   sequence?: number;
+  sandbox_id?: string;
 }
 
 export interface Thread {
@@ -96,16 +97,10 @@ export interface ActiveAgentRun {
   started_at: string;
 }
 
-export interface InitiateAgentResponse {
+export interface UnifiedAgentStartResponse {
   thread_id: string;
-  agent_run_id: string | null;
-}
-
-export interface InitiateAgentInput {
-  prompt: string;
-  files?: File[];
-  agent_id?: string;
-  model_name?: string;
+  agent_run_id: string;
+  status: string;
 }
 
 // ============================================================================

@@ -18,10 +18,13 @@ export * from './markdown-styles';
 // Parsing & formatting
 export * from './message-grouping';
 export * from './tool-parser';
+export * from './tool-display';
+export * from './credit-formatter';
 
 // Domain-specific utilities
 export * from './thread-utils';
 export * from './trigger-utils';
+export * from './model-provider';
 
 // Type definitions
 export * from './auth-types';

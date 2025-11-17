@@ -305,8 +305,9 @@ class TrialService:
                     'quantity': 1
                 }],
                 mode='subscription',
-                ui_mode='embedded',  # Enable embedded checkout
-                return_url=success_url,  # For embedded checkout
+                ui_mode='embedded',
+                return_url=success_url,
+                allow_promotion_codes=True,
                 metadata={
                     'account_id': account_id,
                     'trial_start': 'true'
@@ -332,15 +333,14 @@ class TrialService:
             client_secret = getattr(session, 'client_secret', None)
             
             # Generate frontend checkout wrapper URL for Apple compliance  
-            import os
-            frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+            frontend_url = config.FRONTEND_URL
             
             # Use client_secret in URL for embedded checkout, fallback to session_id
             checkout_param = f"client_secret={client_secret}" if client_secret else f"session_id={session.id}"
             fe_checkout_url = f"{frontend_url}/checkout?{checkout_param}"
             
             return {
-                'checkout_url': session.url,  # Direct Stripe checkout (for web fallback)
+                'checkout_url': fe_checkout_url,  # Use embedded checkout URL (session.url is None for embedded mode)
                 'fe_checkout_url': fe_checkout_url,  # Kortix-branded wrapper with embedded checkout
                 'session_id': session.id,
                 'client_secret': client_secret,  # For direct API usage

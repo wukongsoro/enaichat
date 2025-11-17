@@ -13,9 +13,11 @@ import { ArrowRight, Clock, PlugZap } from 'lucide-react';
 import { EventBasedTriggerDialog } from '@/components/agents/triggers/event-based-trigger-dialog';
 import { SimplifiedScheduleConfig } from '@/components/agents/triggers/providers/simplified-schedule-config';
 import { ScheduleTriggerConfig } from '@/components/agents/triggers/types';
-import { useCreateTrigger, useUpdateTrigger } from '@/hooks/react-query/triggers';
+import { useCreateTrigger, useUpdateTrigger } from '@/hooks/triggers';
 import { toast } from 'sonner';
 import { AgentSelector } from '@/components/agents/agent-selector';
+import { TriggerLimitError } from '@/lib/api/errors';
+import { usePricingModalStore } from '@/stores/pricing-modal-store';
 
 interface TriggerCreationDialogProps {
   open: boolean;
@@ -25,6 +27,7 @@ interface TriggerCreationDialogProps {
   isEditMode?: boolean;
   existingTrigger?: any; // TriggerConfiguration for edit mode
   onTriggerUpdated?: (triggerId: string) => void;
+  agentId?: string; // Pre-selected agent ID (e.g., from agent config page)
 }
 
 export function TriggerCreationDialog({
@@ -34,10 +37,11 @@ export function TriggerCreationDialog({
   onTriggerCreated,
   isEditMode = false,
   existingTrigger,
-  onTriggerUpdated
+  onTriggerUpdated,
+  agentId
 }: TriggerCreationDialogProps) {
-  const [selectedAgent, setSelectedAgent] = useState<string>('');
-  const [step, setStep] = useState<'agent' | 'config'>('agent');
+  const [selectedAgent, setSelectedAgent] = useState<string>(agentId || '');
+  const [step, setStep] = useState<'agent' | 'config'>(agentId ? 'config' : 'agent');
   const [name, setName] = useState<string>('');
   const [description, setDescription] = useState<string>('');
   const [config, setConfig] = useState<ScheduleTriggerConfig>({
@@ -45,18 +49,28 @@ export function TriggerCreationDialog({
   });
   const createTriggerMutation = useCreateTrigger();
   const updateTriggerMutation = useUpdateTrigger();
+  const pricingModalStore = usePricingModalStore();
 
-  // Initialize form for edit mode
+  // Initialize form for edit mode or pre-selected agent
   React.useEffect(() => {
-    if (isEditMode && existingTrigger && open) {
-      setSelectedAgent(existingTrigger.agent_id || '');
-      setName(existingTrigger.name || '');
-      setDescription(existingTrigger.description || '');
-      setConfig(existingTrigger.config || { cron_expression: '' });
-      // Skip agent selection step in edit mode
-      setStep('config');
+    if (open) {
+      if (isEditMode && existingTrigger) {
+        setSelectedAgent(existingTrigger.agent_id || agentId || '');
+        setName(existingTrigger.name || '');
+        setDescription(existingTrigger.description || '');
+        setConfig(existingTrigger.config || { cron_expression: '' });
+        // Skip agent selection step in edit mode
+        setStep('config');
+      } else if (agentId) {
+        // Pre-selected agent, skip to config step
+        setSelectedAgent(agentId);
+        setStep('config');
+      } else {
+        // No pre-selected agent, start at agent selection
+        setStep('agent');
+      }
     }
-  }, [isEditMode, existingTrigger, open]);
+  }, [isEditMode, existingTrigger, open, agentId]);
 
   const scheduleProvider = {
     provider_id: 'schedule',
@@ -74,7 +88,6 @@ export function TriggerCreationDialog({
 
     try {
       if (isEditMode && existingTrigger) {
-        // Update existing trigger
         await updateTriggerMutation.mutateAsync({
           triggerId: existingTrigger.trigger_id,
           name: data.name || 'Scheduled Trigger',
@@ -105,14 +118,27 @@ export function TriggerCreationDialog({
 
       handleClose();
     } catch (error: any) {
+      if (error instanceof TriggerLimitError) {
+        const triggerType = error.detail.trigger_type === 'scheduled' ? 'scheduled' : 'app-based';
+        const upgradeMessage = `Upgrade to create more ${triggerType} triggers`;
+        pricingModalStore.openPricingModal({ isAlert: true, alertTitle: upgradeMessage });
+        handleClose();
+        return;
+      }
       toast.error(error.message || `Failed to ${isEditMode ? 'update' : 'create'} schedule trigger`);
       console.error(`Error ${isEditMode ? 'updating' : 'creating'} schedule trigger:`, error);
     }
   };
 
   const handleClose = () => {
-    setSelectedAgent('');
-    setStep('agent');
+    if (!agentId) {
+      setSelectedAgent('');
+      setStep('agent');
+    } else {
+      // Keep the pre-selected agent
+      setSelectedAgent(agentId);
+      setStep('config');
+    }
     onOpenChange(false);
   };
 
