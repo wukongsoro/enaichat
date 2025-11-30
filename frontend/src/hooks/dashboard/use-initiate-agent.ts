@@ -15,11 +15,14 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { handleApiSuccess, handleApiError } from "@/lib/error-handler";
 import { dashboardKeys } from "./keys";
 import { useQueryClient } from "@tanstack/react-query";
+import { useTranslations } from 'next-intl';
 
 import { projectKeys, threadKeys } from "../threads/keys";
 import { backendApi } from "@/lib/api-client";
 
 export const useInitiateAgentMutation = () => {
+  const t = useTranslations('dashboard');
+  
   return useMutation<
     UnifiedAgentStartResponse, 
     Error,
@@ -54,7 +57,7 @@ export const useInitiateAgentMutation = () => {
       });
     },
     onSuccess: (data) => {
-      handleApiSuccess("Agent initiated successfully", "Your AI assistant is ready to help");
+      handleApiSuccess(t('agentInitiatedSuccessfully'), t('aiAssistantReady'));
     },
     onError: (error) => {
       // Let all limit/billing errors bubble up to be handled by components
@@ -76,18 +79,6 @@ export const useInitiateAgentMutation = () => {
     }
   });
 };
-
-export const useThreadLimit = () => {
-  return useQuery({
-    queryKey: threadKeys.limit(),
-    queryFn: async () => {
-      const response = await backendApi.get('/limits?type=thread_count');
-      return response.data.thread_count || response.data;
-    },
-    staleTime: 30000,
-    refetchOnWindowFocus: false,
-  });
-}
 
 export const useInitiateAgentWithInvalidation = () => {
   const queryClient = useQueryClient();

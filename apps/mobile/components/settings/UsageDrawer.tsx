@@ -16,21 +16,33 @@ interface UsageDrawerProps {
   onClose: () => void;
   onUpgradePress?: () => void;
   onTopUpPress?: () => void;
+  onThreadPress?: (threadId: string, projectId: string | null) => void;
 }
 
-export function UsageDrawer({ visible, onClose, onUpgradePress, onTopUpPress }: UsageDrawerProps) {
+export function UsageDrawer({ visible, onClose, onUpgradePress, onTopUpPress, onThreadPress }: UsageDrawerProps) {
   const bottomSheetRef = React.useRef<BottomSheet>(null);
+  const isOpeningRef = React.useRef(false);
+  const timeoutRef = React.useRef<NodeJS.Timeout | null>(null);
   const snapPoints = React.useMemo(() => ['85%'], []);
   const { colorScheme } = useColorScheme();
   const insets = useSafeAreaInsets();
   const { t } = useLanguage();
 
   React.useEffect(() => {
-    if (visible) {
+    if (visible && !isOpeningRef.current) {
+      isOpeningRef.current = true;
+
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      timeoutRef.current = setTimeout(() => {
+        console.log('📳 [UsageDrawer] Fallback timeout - resetting guard');
+        isOpeningRef.current = false;
+      }, 500);
+
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       console.log('📳 Haptic Feedback: Usage Drawer Opened');
       bottomSheetRef.current?.snapToIndex(0);
-    } else {
+    } else if (!visible) {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
       bottomSheetRef.current?.close();
     }
   }, [visible]);
@@ -42,9 +54,11 @@ export function UsageDrawer({ visible, onClose, onUpgradePress, onTopUpPress }: 
   }, [onClose]);
 
   const handleThreadPress = React.useCallback((threadId: string, projectId: string | null) => {
-    console.log('🎯 Thread pressed:', threadId);
+    console.log('🎯 Thread pressed from UsageDrawer:', threadId);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-  }, []);
+    onClose();
+    onThreadPress?.(threadId, projectId);
+  }, [onClose, onThreadPress]);
 
   const renderBackdrop = React.useCallback(
     (props: BottomSheetBackdropProps) => (
@@ -60,8 +74,16 @@ export function UsageDrawer({ visible, onClose, onUpgradePress, onTopUpPress }: 
   );
 
   const handleSheetChange = React.useCallback((index: number) => {
+    console.log('📳 [UsageDrawer] Sheet index changed:', index);
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
     if (index === -1) {
+      isOpeningRef.current = false;
       onClose();
+    } else if (index >= 0) {
+      isOpeningRef.current = false;
     }
   }, [onClose]);
 
@@ -73,10 +95,10 @@ export function UsageDrawer({ visible, onClose, onUpgradePress, onTopUpPress }: 
       enablePanDownToClose
       onChange={handleSheetChange}
       backdropComponent={renderBackdrop}
-      backgroundStyle={{ 
+      backgroundStyle={{
         backgroundColor: colorScheme === 'dark' ? '#161618' : '#FFFFFF'
       }}
-      handleIndicatorStyle={{ 
+      handleIndicatorStyle={{
         backgroundColor: colorScheme === 'dark' ? '#3F3F46' : '#D4D4D8',
         width: 36,
         height: 5,
@@ -91,7 +113,7 @@ export function UsageDrawer({ visible, onClose, onUpgradePress, onTopUpPress }: 
         overflow: 'hidden'
       }}
     >
-      <BottomSheetScrollView 
+      <BottomSheetScrollView
         className="flex-1"
         showsVerticalScrollIndicator={false}
       >
@@ -101,20 +123,20 @@ export function UsageDrawer({ visible, onClose, onUpgradePress, onTopUpPress }: 
             className="w-8 h-8 items-center justify-center bg-primary/10 rounded-full p-2"
             hitSlop={8}
           >
-            <Icon 
-              as={X} 
-              size={24} 
-              className="text-foreground" 
-              strokeWidth={2} 
+            <Icon
+              as={X}
+              size={24}
+              className="text-foreground"
+              strokeWidth={2}
             />
           </Pressable>
-          
+
           <Text className="text-xl font-roobert-medium text-foreground tracking-tight">
             {t('usage.title')}
           </Text>
         </View>
 
-        <UsageContent 
+        <UsageContent
           onThreadPress={handleThreadPress}
           onUpgradePress={onUpgradePress}
           onTopUpPress={onTopUpPress}

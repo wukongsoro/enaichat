@@ -1,8 +1,9 @@
-import type { ParsedToolData } from '@/lib/utils/tool-parser';
+import type { ToolCallData, ToolResultData } from '@/lib/utils/tool-data-extractor';
 
 export interface CompleteToolData {
   text: string | null;
   attachments: string[];
+  follow_up_prompts: string[];
   success: boolean;
 }
 
@@ -17,11 +18,22 @@ const parseContent = (content: any): any => {
   return content;
 };
 
-export function extractCompleteData(toolData: ParsedToolData): CompleteToolData {
-  const { arguments: args, result } = toolData;
+export function extractCompleteData({ toolCall, toolResult }: { toolCall: ToolCallData; toolResult?: ToolResultData }): CompleteToolData {
+  const args = typeof toolCall.arguments === 'object' && toolCall.arguments !== null
+    ? toolCall.arguments
+    : typeof toolCall.arguments === 'string'
+      ? (() => {
+          try {
+            return JSON.parse(toolCall.arguments);
+          } catch {
+            return {};
+          }
+        })()
+      : {};
   
   let text = args?.text || args?.summary || null;
   let attachments: string[] = [];
+  let follow_up_prompts: string[] = [];
   
   if (args?.attachments) {
     if (typeof args.attachments === 'string') {
@@ -31,14 +43,19 @@ export function extractCompleteData(toolData: ParsedToolData): CompleteToolData 
     }
   }
   
-  if (result.output && typeof result.output === 'string') {
-    text = text || result.output;
+  if (args?.follow_up_prompts && Array.isArray(args.follow_up_prompts)) {
+    follow_up_prompts = args.follow_up_prompts.filter((p: string) => p && p.trim().length > 0);
+  }
+  
+  if (toolResult?.output && typeof toolResult.output === 'string') {
+    text = text || toolResult.output;
   }
   
   return {
     text,
     attachments,
-    success: result.success ?? true
+    follow_up_prompts,
+    success: toolResult?.success ?? true
   };
 }
 

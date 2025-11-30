@@ -45,15 +45,13 @@ max_client_conn = 100
 # [db.vault]
 # secret_key = "env(SECRET_VALUE)"
 
-# Custom database settings for webhook functionality
+# Note: Webhook configuration is stored in the database table `webhook_config`
 # See: migrations/20251113000000_welcome_email_webhook.sql
 #
 # ⚠️  These settings ONLY apply if you're running LOCAL Supabase (rare)
 # Most people use CLOUD Supabase → configure in Supabase Dashboard instead
 # See: backend/supabase/WEBHOOK_SETUP.md
 [db.settings]
-app.backend_url = "http://backend:8000"
-app.webhook_secret = "your-webhook-secret-here-change-in-production"
 
 [db.migrations]
 # Specifies an ordered list of schema files that describe your database.
@@ -116,7 +114,16 @@ enabled = true
 # in emails.
 site_url = "http://localhost:3000"
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
-additional_redirect_urls = ["kortix://auth/callback"]
+# Note: For cloud Supabase, configure these in Dashboard → Authentication → URL Configuration
+additional_redirect_urls = [
+  "kortix://auth/callback",
+  "http://localhost:3000/**",
+  "http://localhost:3000/auth/callback",
+  "https://staging.suna.so/**",
+  "https://staging.suna.so/auth/callback",
+  "https://kortix.com/**",
+  "https://kortix.com/auth/callback",
+]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # If disabled, the refresh token will never expire.

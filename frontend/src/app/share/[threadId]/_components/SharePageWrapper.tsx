@@ -1,17 +1,13 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
-import { SidebarProvider, SidebarInset } from '@/components/ui/sidebar';
-import { SidebarLeft } from '@/components/sidebar/sidebar-left';
+import React, { useEffect, useState, Suspense, lazy } from 'react';
 import { createClient } from '@/lib/supabase/client';
-import { useDeleteOperationEffects } from '@/stores/delete-operation-store';
-import { SubscriptionStoreSync } from '@/stores/subscription-store';
+import { AppProviders } from '@/components/layout/app-providers';
 
-// Wrapper component to handle delete operation side effects
-function DeleteOperationEffectsWrapper({ children }: { children: React.ReactNode }) {
-    useDeleteOperationEffects();
-    return <>{children}</>;
-}
+// Lazy load presentation modal (only needed when presentations are opened)
+const PresentationViewerWrapper = lazy(() =>
+  import('@/stores/presentation-viewer-store').then(mod => ({ default: mod.PresentationViewerWrapper }))
+);
 
 export function SharePageWrapper({ children }: { children: React.ReactNode }) {
     const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
@@ -41,19 +37,22 @@ export function SharePageWrapper({ children }: { children: React.ReactNode }) {
     // If user is logged in, wrap with all necessary providers and show sidebar
     if (isLoggedIn) {
         return (
-            <DeleteOperationEffectsWrapper>
-                <SubscriptionStoreSync>
-                    <SidebarProvider>
-                        <SidebarLeft />
-                        <SidebarInset>
-                            {children}
-                        </SidebarInset>
-                    </SidebarProvider>
-                </SubscriptionStoreSync>
-            </DeleteOperationEffectsWrapper>
+            <AppProviders showSidebar={true}>
+                {children}
+                <Suspense fallback={null}>
+                    <PresentationViewerWrapper />
+                </Suspense>
+            </AppProviders>
         );
     }
 
     // Anon user: render children without sidebar or subscription sync (no auth required)
-    return <div className="flex-1">{children}</div>;
+    return (
+        <div className="flex-1">
+            {children}
+            <Suspense fallback={null}>
+                <PresentationViewerWrapper />
+            </Suspense>
+        </div>
+    );
 }

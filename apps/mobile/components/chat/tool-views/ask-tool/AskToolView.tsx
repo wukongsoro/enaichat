@@ -1,15 +1,15 @@
 import React from 'react';
-import { View, ScrollView } from 'react-native';
+import { View, ScrollView, Pressable } from 'react-native';
 import { Text } from '@/components/ui/text';
 import { Icon } from '@/components/ui/icon';
-import { MessageCircleQuestion, CheckCircle2, AlertCircle, Paperclip } from 'lucide-react-native';
+import { MessageCircleQuestion, CheckCircle2, AlertCircle, Paperclip, Info, ChevronRight } from 'lucide-react-native';
 import type { ToolViewProps } from '../types';
 import { extractAskData } from './_utils';
 import { FileAttachmentsGrid } from '@/components/chat/FileAttachmentRenderer';
 
-export function AskToolView({ toolData, isStreaming = false, project, assistantMessage }: ToolViewProps) {
-  const { text, attachments, success } = extractAskData(toolData);
-  const sandboxId = project?.sandbox_id || assistantMessage?.sandbox_id;
+export function AskToolView({ toolCall, toolResult, isSuccess = true, isStreaming = false, project }: ToolViewProps) {
+  const { text, attachments, follow_up_answers, success } = extractAskData(toolCall, toolResult, isSuccess);
+  const sandboxId = project?.sandbox_id;
 
   if (isStreaming) {
     return (
@@ -29,35 +29,7 @@ export function AskToolView({ toolData, isStreaming = false, project, assistantM
 
   return (
     <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
-      <View className="px-6 py-4 gap-6">
-        <View className="flex-row items-center gap-3">
-          <View className="bg-blue-500/10 rounded-2xl items-center justify-center" style={{ width: 48, height: 48 }}>
-            <Icon as={MessageCircleQuestion} size={24} className="text-blue-500" />
-          </View>
-          <View className="flex-1">
-            <Text className="text-xs font-roobert-medium text-foreground/50 uppercase tracking-wider mb-1">
-              Ask User
-            </Text>
-            <Text className="text-xl font-roobert-semibold text-foreground">
-              Question Asked
-            </Text>
-          </View>
-          <View className={`flex-row items-center gap-1.5 px-2.5 py-1 rounded-full ${
-            success ? 'bg-primary/10' : 'bg-destructive/10'
-          }`}>
-            <Icon 
-              as={success ? CheckCircle2 : AlertCircle} 
-              size={12} 
-              className={success ? 'text-primary' : 'text-destructive'} 
-            />
-            <Text className={`text-xs font-roobert-medium ${
-              success ? 'text-primary' : 'text-destructive'
-            }`}>
-              {success ? 'Success' : 'Failed'}
-            </Text>
-          </View>
-        </View>
-
+      <View className="px-6 gap-6">
         {text && (
           <View className="bg-muted/50 rounded-xl p-4 border border-border">
             <Text className="text-sm font-roobert text-foreground" selectable>
@@ -80,6 +52,34 @@ export function AskToolView({ toolData, isStreaming = false, project, assistantM
               compact={false}
               showPreviews={true}
             />
+          </View>
+        )}
+
+        <View className="flex-row items-start gap-2.5 rounded-xl border border-border bg-muted/40 dark:bg-muted/20 px-3 py-2.5">
+          <Icon as={Info} size={16} className="text-muted-foreground mt-0.5 flex-shrink-0" />
+          <Text className="text-sm font-roobert text-muted-foreground flex-1 leading-relaxed">
+            Kortix will automatically continue working once you provide your response.
+          </Text>
+        </View>
+
+        {/* Follow-up Answers */}
+        {follow_up_answers && follow_up_answers.length > 0 && (
+          <View className="gap-2">
+            {follow_up_answers.slice(0, 4).map((answer, index) => (
+              <Pressable
+                key={index}
+                onPress={() => {
+                  // TODO: Handle follow-up answer click - could trigger a response
+                  console.log('Follow-up answer clicked:', answer);
+                }}
+                className="flex-row items-center justify-between gap-3 px-3 py-2.5 rounded-lg bg-muted/30 border border-border/50 active:bg-muted/50"
+              >
+                <Text className="text-sm font-roobert text-foreground/70 flex-1 leading-relaxed">
+                  {answer}
+                </Text>
+                <Icon as={ChevronRight} size={14} className="text-muted-foreground/40" />
+              </Pressable>
+            ))}
           </View>
         )}
 

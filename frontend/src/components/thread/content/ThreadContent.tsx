@@ -1,23 +1,40 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
-import { CircleDashed, CheckCircle, AlertTriangle } from 'lucide-react';
+import { CircleDashed, CheckCircle, AlertTriangle, Info, CheckCircle2, Clock } from 'lucide-react';
+import { useTranslations } from 'next-intl';
 import { UnifiedMessage, ParsedContent, ParsedMetadata } from '@/components/thread/types';
 import { FileAttachmentGrid } from '@/components/thread/file-attachment';
 import { useFilePreloader } from '@/hooks/files';
 import { useAuth } from '@/components/AuthProvider';
-import { Project } from '@/lib/api/projects';
+import { Project } from '@/lib/api/threads';
 import {
     extractPrimaryParam,
     getToolIcon,
     getUserFriendlyToolName,
     safeJsonParse,
+    HIDE_STREAMING_XML_TAGS,
 } from '@/components/thread/utils';
 import { KortixLogo } from '@/components/sidebar/kortix-logo';
 import { AgentLoader } from './loader';
-import { parseXmlToolCalls, isNewXmlFormat } from '@/components/thread/tool-views/xml-parser';
+// Removed XML parsing - we only use metadata now
 import { ShowToolStream } from './ShowToolStream';
 import { ComposioUrlDetector } from './composio-url-detector';
-import { HIDE_STREAMING_XML_TAGS } from '@/components/thread/utils';
+import { TaskCompletedFeedback } from '@/components/thread/tool-views/shared/TaskCompletedFeedback';
+import { PromptExamples } from '@/components/shared/prompt-examples';
+import { 
+    renderAssistantMessage,
+    extractTextFromPartialJson,
+    extractTextFromStreamingAskComplete,
+    isAskOrCompleteTool,
+    extractTextFromArguments,
+    findAskOrCompleteTool,
+    shouldSkipStreamingRender,
+} from '@/hooks/messages/utils';
 
+// Configuration for prompt/answer rendering
+const PROMPT_SAMPLES_CONFIG = {
+  enableAskSamples: true,
+  enableCompleteSamples: true,
+} as const;
 
 // Helper function to render attachments (keeping original implementation for now)
 export function renderAttachments(attachments: string[], fileViewerHandler?: (filePath?: string, filePathList?: string[]) => void, sandboxId?: string, project?: Project) {
@@ -36,228 +53,10 @@ export function renderAttachments(attachments: string[], fileViewerHandler?: (fi
     />;
 }
 
-// Render Markdown content while preserving XML tags that should be displayed as tool calls
-export function renderMarkdownContent(
-    content: string,
-    handleToolClick: (assistantMessageId: string | null, toolName: string) => void,
-    messageId: string | null,
-    fileViewerHandler?: (filePath?: string, filePathList?: string[]) => void,
-    sandboxId?: string,
-    project?: Project,
-    debugMode?: boolean
-) {
-    // If in debug mode, just display raw content in a pre tag
-    if (debugMode) {
-        return (
-            <pre className="text-xs font-mono whitespace-pre-wrap overflow-x-auto p-2 border border-border rounded-md bg-muted/30 text-foreground">
-                {content}
-            </pre>
-        );
-    }
+// NOTE: extractTextFromPartialJson, extractTextFromStreamingAskComplete, isAskOrCompleteTool, etc.
+// are now imported from '@/hooks/messages/utils' for portability to mobile
 
-    if (isNewXmlFormat(content)) {
-        const contentParts: React.ReactNode[] = [];
-        let lastIndex = 0;
-
-        // Find all function_calls blocks
-        const functionCallsRegex = /<function_calls>([\s\S]*?)<\/function_calls>/gi;
-        let match: RegExpExecArray | null = null;
-
-        while ((match = functionCallsRegex.exec(content)) !== null) {
-            // Add text before the function_calls block
-            if (match.index > lastIndex) {
-                const textBeforeBlock = content.substring(lastIndex, match.index);
-                if (textBeforeBlock.trim()) {
-                    contentParts.push(
-                        <ComposioUrlDetector key={`md-${lastIndex}`} content={textBeforeBlock} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words" />
-                    );
-                }
-            }
-
-            // Parse the tool calls in this block
-            const toolCalls = parseXmlToolCalls(match[0]);
-
-            toolCalls.forEach((toolCall, index) => {
-                const toolName = toolCall.functionName.replace(/_/g, '-');
-
-                if (toolName === 'ask') {
-                    // Handle ask tool specially - extract text and attachments
-                    const askText = toolCall.parameters.text || '';
-                    const attachments = toolCall.parameters.attachments || [];
-
-                    // Convert single attachment to array for consistent handling
-                    const attachmentArray = Array.isArray(attachments) ? attachments :
-                        (typeof attachments === 'string' ? attachments.split(',').map(a => a.trim()) : []);
-
-                    // Render ask tool content with attachment UI
-                    contentParts.push(
-                        <div key={`ask-${match.index}-${index}`} className="space-y-3">
-                            <ComposioUrlDetector content={askText} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words [&>:first-child]:mt-0 prose-headings:mt-3" />
-                            {renderAttachments(attachmentArray, fileViewerHandler, sandboxId, project)}
-                        </div>
-                    );
-                } else if (toolName === 'complete') {
-                    // Handle complete tool specially - extract text and attachments
-                    const completeText = toolCall.parameters.text || '';
-                    const attachments = toolCall.parameters.attachments || '';
-
-                    // Convert single attachment to array for consistent handling
-                    const attachmentArray = Array.isArray(attachments) ? attachments :
-                        (typeof attachments === 'string' ? attachments.split(',').map(a => a.trim()) : []);
-
-                    // Render complete tool content with attachment UI
-                    contentParts.push(
-                        <div key={`complete-${match.index}-${index}`} className="space-y-3">
-                            <ComposioUrlDetector content={completeText} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words [&>:first-child]:mt-0 prose-headings:mt-3" />
-                            {renderAttachments(attachmentArray, fileViewerHandler, sandboxId, project)}
-                        </div>
-                    );
-                } else {
-                    const IconComponent = getToolIcon(toolName);
-
-                    // Extract primary parameter for display
-                    let paramDisplay = '';
-                    if (toolCall.parameters.file_path) {
-                        paramDisplay = toolCall.parameters.file_path;
-                    } else if (toolCall.parameters.command) {
-                        paramDisplay = toolCall.parameters.command;
-                    } else if (toolCall.parameters.query) {
-                        paramDisplay = toolCall.parameters.query;
-                    } else if (toolCall.parameters.url) {
-                        paramDisplay = toolCall.parameters.url;
-                    }
-
-                    contentParts.push(
-                        <div
-                            key={`tool-${match.index}-${index}`}
-                            className="my-1"
-                        >
-                            <button
-                                onClick={() => handleToolClick(messageId, toolName)}
-                                className="inline-flex items-center gap-1.5 py-1 px-1 pr-1.5 text-xs text-muted-foreground bg-muted hover:bg-muted/80 rounded-lg transition-colors cursor-pointer border border-neutral-200 dark:border-neutral-700/50"
-                            >
-                                <div className='border-2 bg-gradient-to-br from-neutral-200 to-neutral-300 dark:from-neutral-700 dark:to-neutral-800 flex items-center justify-center p-0.5 rounded-sm border-neutral-400/20 dark:border-neutral-600'>
-                                    <IconComponent className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
-                                </div>
-                                <span className="font-mono text-xs text-foreground">{getUserFriendlyToolName(toolName)}</span>
-                                {paramDisplay && <span className="ml-1 text-muted-foreground truncate max-w-[200px]" title={paramDisplay}>{paramDisplay}</span>}
-                            </button>
-                        </div>
-                    );
-                }
-            });
-
-            lastIndex = match.index + match[0].length;
-        }
-
-        // Add any remaining text after the last function_calls block
-        if (lastIndex < content.length) {
-            const remainingText = content.substring(lastIndex);
-            if (remainingText.trim()) {
-                contentParts.push(
-                    <ComposioUrlDetector key={`md-${lastIndex}`} content={remainingText} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words" />
-                );
-            }
-        }
-
-        return contentParts.length > 0 ? contentParts : <ComposioUrlDetector content={content} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words" />;
-    }
-
-    // Fall back to old XML format handling
-    const xmlRegex = /<(?!inform\b)([a-zA-Z\-_]+)(?:\s+[^>]*)?>(?:[\s\S]*?)<\/\1>|<(?!inform\b)([a-zA-Z\-_]+)(?:\s+[^>]*)?\/>/g;
-    let lastIndex = 0;
-    const contentParts: React.ReactNode[] = [];
-    let match: RegExpExecArray | null = null;
-
-    // If no XML tags found, just return the full content as markdown
-    if (!content.match(xmlRegex)) {
-        return <ComposioUrlDetector content={content} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words" />;
-    }
-
-    while ((match = xmlRegex.exec(content)) !== null) {
-        // Add text before the tag as markdown
-        if (match.index > lastIndex) {
-            const textBeforeTag = content.substring(lastIndex, match.index);
-            contentParts.push(
-                <ComposioUrlDetector key={`md-${lastIndex}`} content={textBeforeTag} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none inline-block mr-1 break-words" />
-            );
-        }
-
-        const rawXml = match[0];
-        const toolName = match[1] || match[2];
-        const toolCallKey = `tool-${match.index}`;
-
-        if (toolName === 'ask') {
-            // Extract attachments from the XML attributes
-            const attachmentsMatch = rawXml.match(/attachments=["']([^"']*)["']/i);
-            const attachments = attachmentsMatch
-                ? attachmentsMatch[1].split(',').map(a => a.trim())
-                : [];
-
-            // Extract content from the ask tag
-            const contentMatch = rawXml.match(/<ask[^>]*>([\s\S]*?)<\/ask>/i);
-            const askContent = contentMatch ? contentMatch[1] : '';
-
-            // Render <ask> tag content with attachment UI (using the helper)
-            contentParts.push(
-                <div key={`ask-${match.index}`} className="space-y-3">
-                    <ComposioUrlDetector content={askContent} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words [&>:first-child]:mt-0 prose-headings:mt-3" />
-                    {renderAttachments(attachments, fileViewerHandler, sandboxId, project)}
-                </div>
-            );
-        } else if (toolName === 'complete') {
-            // Extract attachments from the XML attributes
-            const attachmentsMatch = rawXml.match(/attachments=["']([^"']*)["']/i);
-            const attachments = attachmentsMatch
-                ? attachmentsMatch[1].split(',').map(a => a.trim())
-                : [];
-
-            // Extract content from the complete tag
-            const contentMatch = rawXml.match(/<complete[^>]*>([\s\S]*?)<\/complete>/i);
-            const completeContent = contentMatch ? contentMatch[1] : '';
-
-            // Render <complete> tag content with attachment UI (using the helper)
-            contentParts.push(
-                <div key={`complete-${match.index}`} className="space-y-3">
-                    <ComposioUrlDetector content={completeContent} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words [&>:first-child]:mt-0 prose-headings:mt-3" />
-                    {renderAttachments(attachments, fileViewerHandler, sandboxId, project)}
-                </div>
-            );
-        } else {
-            const IconComponent = getToolIcon(toolName);
-            const paramDisplay = extractPrimaryParam(toolName, rawXml);
-
-            // Render tool button as a clickable element
-            contentParts.push(
-                <div
-                    key={toolCallKey}
-                    className="my-1"
-                >
-                    <button
-                        onClick={() => handleToolClick(messageId, toolName)}
-                        className="inline-flex items-center gap-1.5 py-1 px-1 pr-1.5 text-xs text-muted-foreground bg-muted hover:bg-muted/80 rounded-lg transition-colors cursor-pointer border border-neutral-200 dark:border-neutral-700/50"
-                    >
-                        <div className='border-2 bg-gradient-to-br from-neutral-200 to-neutral-300 dark:from-neutral-700 dark:to-neutral-800 flex items-center justify-center p-0.5 rounded-sm border-neutral-400/20 dark:border-neutral-600'>
-                            <IconComponent className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
-                        </div>
-                        <span className="font-mono text-xs text-foreground">{getUserFriendlyToolName(toolName)}</span>
-                        {paramDisplay && <span className="ml-1 text-muted-foreground truncate max-w-[200px]" title={paramDisplay}>{paramDisplay}</span>}
-                    </button>
-                </div>
-            );
-        }
-        lastIndex = xmlRegex.lastIndex;
-    }
-
-    // Add text after the last tag
-    if (lastIndex < content.length) {
-        contentParts.push(
-            <ComposioUrlDetector key={`md-${lastIndex}`} content={content.substring(lastIndex)} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words" />
-        );
-    }
-
-    return contentParts;
-}
+// REMOVED: renderMarkdownContent - we only use renderAssistantMessage now (metadata-only, no XML parsing)
 
 export interface ThreadContentProps {
     messages: UnifiedMessage[];
@@ -274,13 +73,14 @@ export interface ThreadContentProps {
     streamHookStatus?: string; // Add this prop
     sandboxId?: string; // Add sandboxId prop
     project?: Project; // Add project prop
-    debugMode?: boolean; // Add debug mode parameter
     isPreviewMode?: boolean;
     agentName?: string;
     agentAvatar?: React.ReactNode;
     emptyStateComponent?: React.ReactNode; // Add custom empty state component prop
     threadMetadata?: any; // Add thread metadata prop
     scrollContainerRef?: React.RefObject<HTMLDivElement>; // Add scroll container ref prop
+    threadId?: string; // Add threadId prop
+    onPromptFill?: (message: string) => void; // Handler for filling ChatInput with prompt text from samples
 }
 
 export const ThreadContent: React.FC<ThreadContentProps> = ({
@@ -298,26 +98,28 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
     streamHookStatus = "idle",
     sandboxId,
     project,
-    debugMode = false,
     isPreviewMode = false,
     agentName = 'Suna',
     agentAvatar = <KortixLogo size={16} />,
     emptyStateComponent,
     threadMetadata,
     scrollContainerRef,
+    threadId,
+    onPromptFill,
 }) => {
     const messagesContainerRef = useRef<HTMLDivElement>(null);
     const latestMessageRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
     const [shouldJustifyToTop, setShouldJustifyToTop] = useState(false);
     const { session } = useAuth();
+    const t = useTranslations();
 
     // React Query file preloader
     const { preloadFiles } = useFilePreloader();
 
     const containerClassName = isPreviewMode
-        ? "flex-1 overflow-y-auto scrollbar-thin scrollbar-track-secondary/0 scrollbar-thumb-primary/10 scrollbar-thumb-rounded-full hover:scrollbar-thumb-primary/10 px-6 py-4 pb-0"
-        : "flex-1 overflow-y-auto scrollbar-thin scrollbar-track-secondary/0 scrollbar-thumb-primary/10 scrollbar-thumb-rounded-full hover:scrollbar-thumb-primary/10 px-6 py-4 pb-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60";
+        ? "flex-1 overflow-y-auto scrollbar-hide px-4 py-4 pb-0"
+        : "flex-1 overflow-y-auto scrollbar-hide px-4 py-4 pb-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60";
 
     // In playback mode, we use visibleMessages instead of messages
     const displayMessages = readOnly && visibleMessages ? visibleMessages : messages;
@@ -368,9 +170,10 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
         };
     }, [threadMetadata, displayMessages, agentName, agentAvatar]);
 
-    // Simplified scroll handler - flex-column-reverse handles positioning
+    // Scroll handler - trigger parent scroll detection if needed
     const handleScroll = useCallback(() => {
-        // No scroll logic needed with flex-column-reverse
+        // Scroll event will bubble up, parent component handles detection
+        // No additional logic needed here
     }, []);
 
     // No scroll-to-bottom needed with flex-column-reverse
@@ -449,10 +252,10 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                 // Render scrollable content container with column-reverse
                 <div
                     ref={scrollContainerRef || messagesContainerRef}
-                    className={`${containerClassName} flex flex-col-reverse ${shouldJustifyToTop ? 'justify-end min-h-full' : ''}`}
+                    className={`${containerClassName} min-h-0 flex flex-col-reverse ${shouldJustifyToTop ? 'justify-end min-h-full' : ''}`}
                     onScroll={handleScroll}
                 >
-                    <div ref={contentRef} className="mx-auto max-w-3xl md:px-8 min-w-0 w-full">
+                    <div ref={contentRef} className="mx-auto max-w-3xl min-w-0 w-full pl-6 pr-6">
                         <div className="space-y-8 min-w-0">
                             {(() => {
 
@@ -612,6 +415,21 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                     appendStreamingContent(streamingTextContent, false);
                                 }
 
+                                // Handle streaming tool call (e.g., ask/complete) - ensure there's a group to render in
+                                // This is needed because native tool calls have no text content, only metadata
+                                if (streamingToolCall && !streamingTextContent) {
+                                    const lastGroup = finalGroupedMessages.at(-1);
+                                    if (!lastGroup || lastGroup.type === 'user') {
+                                        // Create new empty assistant group so streaming tool call can render
+                                        assistantGroupCounter++;
+                                        finalGroupedMessages.push({
+                                            type: 'assistant_group',
+                                            messages: [],
+                                            key: `assistant-group-${assistantGroupCounter}-streaming-tool`
+                                        });
+                                    }
+                                }
+
                                 // Handle playback mode streaming text
                                 if (readOnly && streamingText && isStreamingText) {
                                     appendStreamingContent(streamingText, true);
@@ -623,24 +441,14 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                         const messageContent = (() => {
                                             try {
                                                 const parsed = safeJsonParse<ParsedContent>(message.content, { content: message.content });
-                                                return parsed.content || message.content;
+                                                const content = parsed.content || message.content;
+                                                // Ensure we always return a string
+                                                return typeof content === 'string' ? content : String(content || '');
                                             } catch {
-                                                return message.content;
+                                                // Ensure we always return a string
+                                                return typeof message.content === 'string' ? message.content : String(message.content || '');
                                             }
                                         })();
-
-                                        // In debug mode, display raw message content
-                                        if (debugMode) {
-                                            return (
-                                                <div key={group.key} className="flex justify-end">
-                                                    <div className="flex max-w-[85%] rounded-2xl bg-card px-4 py-3 break-words overflow-hidden">
-                                                        <pre className="text-xs font-mono whitespace-pre-wrap overflow-x-auto min-w-0 flex-1">
-                                                            {message.content}
-                                                        </pre>
-                                                    </div>
-                                                </div>
-                                            );
-                                        }
 
                                         // Extract attachments from the message content
                                         const attachmentsMatch = messageContent.match(/\[Uploaded File: (.*?)\]/g);
@@ -685,33 +493,6 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                     <div className="flex max-w-[90%] text-sm break-words overflow-hidden">
                                                         <div className="space-y-2 min-w-0 flex-1">
                                                             {(() => {
-                                                                // In debug mode, just show raw messages content
-                                                                if (debugMode) {
-                                                                    return group.messages.map((message, msgIndex) => {
-                                                                        const msgKey = message.message_id || `raw-msg-${msgIndex}`;
-                                                                        return (
-                                                                            <div key={msgKey} className="mb-4">
-                                                                                <div className="text-xs font-medium text-muted-foreground mb-1">
-                                                                                    Type: {message.type} | ID: {message.message_id || 'no-id'}
-                                                                                </div>
-                                                                                <pre className="text-xs font-mono whitespace-pre-wrap overflow-x-auto p-2 border border-border rounded-md bg-muted/30">
-                                                                                    {JSON.stringify(message.content, null, 2)}
-                                                                                </pre>
-                                                                                {message.metadata && message.metadata !== '{}' && (
-                                                                                    <div className="mt-2">
-                                                                                        <div className="text-xs font-medium text-muted-foreground mb-1">
-                                                                                            Metadata:
-                                                                                        </div>
-                                                                                        <pre className="text-xs font-mono whitespace-pre-wrap overflow-x-auto p-2 border border-border rounded-md bg-muted/30">
-                                                                                            {JSON.stringify(message.metadata, null, 2)}
-                                                                                        </pre>
-                                                                                    </div>
-                                                                                )}
-                                                                            </div>
-                                                                        );
-                                                                    });
-                                                                }
-
                                                                 const toolResultsMap = new Map<string | null, UnifiedMessage[]>();
                                                                 group.messages.forEach(msg => {
                                                                     if (msg.type === 'tool') {
@@ -727,22 +508,37 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                                 const elements: React.ReactNode[] = [];
                                                                 let assistantMessageCount = 0; // Move this outside the loop
 
+                                                                // Check if this is the last group
+                                                                const isLastGroup = groupIndex === finalGroupedMessages.length - 1;
+                                                                
+                                                                // Find the last assistant message in this group
+                                                                const assistantMessages = group.messages.filter(m => m.type === 'assistant');
+                                                                const lastAssistantMessageId = assistantMessages.length > 0 
+                                                                    ? assistantMessages[assistantMessages.length - 1].message_id 
+                                                                    : null;
+
                                                                 group.messages.forEach((message, msgIndex) => {
                                                                     if (message.type === 'assistant') {
-                                                                        const parsedContent = safeJsonParse<ParsedContent>(message.content, {});
                                                                         const msgKey = message.message_id || `submsg-assistant-${msgIndex}`;
 
-                                                                        if (!parsedContent.content) return;
+                                                                        // Check if this is the latest message (last assistant message in the last group)
+                                                                        const isLatestMessage = isLastGroup && message.message_id === lastAssistantMessageId;
 
-                                                                        const renderedContent = renderMarkdownContent(
-                                                                            parsedContent.content,
-                                                                            handleToolClick,
-                                                                            message.message_id,
-                                                                            handleOpenFileViewer,
+                                                                        // Use ONLY metadata for rendering
+                                                                        const renderedContent = renderAssistantMessage({
+                                                                            message,
+                                                                            onToolClick: handleToolClick,
+                                                                            onFileClick: handleOpenFileViewer,
                                                                             sandboxId,
                                                                             project,
-                                                                            debugMode
-                                                                        );
+                                                                            isLatestMessage,
+                                                                            t,
+                                                                            threadId,
+                                                                            onPromptFill,
+                                                                        });
+                                                                        
+                                                                        // Skip if no content rendered
+                                                                        if (!renderedContent) return;
 
                                                                         elements.push(
                                                                             <div key={msgKey} className={assistantMessageCount > 0 ? "mt-4" : ""}>
@@ -759,29 +555,42 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                                 return elements;
                                                             })()}
 
-                                                            {groupIndex === finalGroupedMessages.length - 1 && !readOnly && (streamHookStatus === 'streaming' || streamHookStatus === 'connecting') && (
+                                                            {/* Render streaming text content (XML tool calls or regular text) */}
+                                                            {groupIndex === finalGroupedMessages.length - 1 && !readOnly && streamingTextContent && (streamHookStatus === 'streaming' || streamHookStatus === 'connecting') && (
                                                                 <div className="mt-2">
                                                                     {(() => {
-                                                                        // In debug mode, show raw streaming content
-                                                                        if (debugMode && streamingTextContent) {
-                                                                            return (
-                                                                                <pre className="text-xs font-mono whitespace-pre-wrap overflow-x-auto p-2 border border-border rounded-md bg-muted/30">
-                                                                                    {streamingTextContent}
-                                                                                </pre>
-                                                                            );
-                                                                        }
-
+                                                                        // Detect XML tags in streaming content
                                                                         let detectedTag: string | null = null;
                                                                         let tagStartIndex = -1;
-                                                                        if (streamingTextContent) {
-                                                                            // First check for new format
+                                                                        
+                                                                        // Check for ask/complete tags (XML format)
+                                                                        const askIndex = streamingTextContent.indexOf('<ask');
+                                                                        const completeIndex = streamingTextContent.indexOf('<complete');
+                                                                        if (askIndex !== -1 && (completeIndex === -1 || askIndex < completeIndex)) {
+                                                                            detectedTag = 'ask';
+                                                                            tagStartIndex = askIndex;
+                                                                        } else if (completeIndex !== -1) {
+                                                                            detectedTag = 'complete';
+                                                                            tagStartIndex = completeIndex;
+                                                                        } else {
+                                                                            // Check for function_calls format
                                                                             const functionCallsIndex = streamingTextContent.indexOf('<function_calls>');
                                                                             if (functionCallsIndex !== -1) {
-                                                                                detectedTag = 'function_calls';
-                                                                                tagStartIndex = functionCallsIndex;
+                                                                                const functionCallsContent = streamingTextContent.substring(functionCallsIndex);
+                                                                                if (functionCallsContent.includes('<invoke name="ask"') || functionCallsContent.includes('<invoke name=\'ask\'')) {
+                                                                                    detectedTag = 'ask';
+                                                                                    tagStartIndex = functionCallsIndex;
+                                                                                } else if (functionCallsContent.includes('<invoke name="complete"') || functionCallsContent.includes('<invoke name=\'complete\'')) {
+                                                                                    detectedTag = 'complete';
+                                                                                    tagStartIndex = functionCallsIndex;
+                                                                                } else {
+                                                                                    detectedTag = 'function_calls';
+                                                                                    tagStartIndex = functionCallsIndex;
+                                                                                }
                                                                             } else {
-                                                                                // Fall back to old format detection
+                                                                                // Check for other tool tags
                                                                                 for (const tag of HIDE_STREAMING_XML_TAGS) {
+                                                                                    if (tag === 'ask' || tag === 'complete') continue;
                                                                                     const openingTagPattern = `<${tag}`;
                                                                                     const index = streamingTextContent.indexOf(openingTagPattern);
                                                                                     if (index !== -1) {
@@ -793,26 +602,29 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                                             }
                                                                         }
 
-
-                                                                        const textToRender = streamingTextContent || '';
+                                                                        const textToRender = streamingTextContent;
                                                                         const textBeforeTag = detectedTag ? textToRender.substring(0, tagStartIndex) : textToRender;
-                                                                        const showCursor =
-                                                                            (streamHookStatus ===
-                                                                                'streaming' ||
-                                                                                streamHookStatus ===
-                                                                                'connecting') &&
-                                                                            !detectedTag;
+                                                                        const isAskOrComplete = detectedTag === 'ask' || detectedTag === 'complete';
 
                                                                         return (
                                                                             <>
                                                                                 {textBeforeTag && (
                                                                                     <ComposioUrlDetector content={textBeforeTag} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none [&>:first-child]:mt-0 prose-headings:mt-3 break-words overflow-wrap-anywhere" />
                                                                                 )}
-                                                                                {showCursor && (
-                                                                                    <span className="inline-block h-4 w-0.5 bg-primary ml-0.5 -mb-1 animate-pulse" />
-                                                                                )}
 
-                                                                                {detectedTag && (
+                                                                                {detectedTag && isAskOrComplete ? (
+                                                                                    // Extract and render text from XML ask/complete
+                                                                                    (() => {
+                                                                                        const streamingContent = textToRender.substring(tagStartIndex);
+                                                                                        const extractedText = extractTextFromStreamingAskComplete(streamingContent, detectedTag as 'ask' | 'complete');
+                                                                                        return (
+                                                                                            <ComposioUrlDetector 
+                                                                                                content={extractedText} 
+                                                                                                className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words [&>:first-child]:mt-0 prose-headings:mt-3" 
+                                                                                            />
+                                                                                        );
+                                                                                    })()
+                                                                                ) : detectedTag ? (
                                                                                     <ShowToolStream
                                                                                         content={textToRender.substring(tagStartIndex)}
                                                                                         messageId={visibleMessages && visibleMessages.length > 0 ? visibleMessages[visibleMessages.length - 1].message_id : "playback-streaming"}
@@ -820,9 +632,7 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                                                         showExpanded={true}
                                                                                         startTime={Date.now()}
                                                                                     />
-                                                                                )}
-
-
+                                                                                ) : null}
                                                                             </>
                                                                         );
                                                                     })()}
@@ -836,20 +646,42 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                                         let detectedTag: string | null = null;
                                                                         let tagStartIndex = -1;
                                                                         if (streamingText) {
-                                                                            // First check for new format
-                                                                            const functionCallsIndex = streamingText.indexOf('<function_calls>');
-                                                                            if (functionCallsIndex !== -1) {
-                                                                                detectedTag = 'function_calls';
-                                                                                tagStartIndex = functionCallsIndex;
+                                                                            // First check for ask/complete tags directly (they should render as markdown)
+                                                                            const askIndex = streamingText.indexOf('<ask');
+                                                                            const completeIndex = streamingText.indexOf('<complete');
+                                                                            if (askIndex !== -1 && (completeIndex === -1 || askIndex < completeIndex)) {
+                                                                                detectedTag = 'ask';
+                                                                                tagStartIndex = askIndex;
+                                                                            } else if (completeIndex !== -1) {
+                                                                                detectedTag = 'complete';
+                                                                                tagStartIndex = completeIndex;
                                                                             } else {
-                                                                                // Fall back to old format detection
-                                                                                for (const tag of HIDE_STREAMING_XML_TAGS) {
-                                                                                    const openingTagPattern = `<${tag}`;
-                                                                                    const index = streamingText.indexOf(openingTagPattern);
-                                                                                    if (index !== -1) {
-                                                                                        detectedTag = tag;
-                                                                                        tagStartIndex = index;
-                                                                                        break;
+                                                                                // Check for new format function_calls
+                                                                                const functionCallsIndex = streamingText.indexOf('<function_calls>');
+                                                                                if (functionCallsIndex !== -1) {
+                                                                                    // Check if function_calls contains ask or complete
+                                                                                    const functionCallsContent = streamingText.substring(functionCallsIndex);
+                                                                                    if (functionCallsContent.includes('<invoke name="ask"') || functionCallsContent.includes('<invoke name=\'ask\'')) {
+                                                                                        detectedTag = 'ask';
+                                                                                        tagStartIndex = functionCallsIndex;
+                                                                                    } else if (functionCallsContent.includes('<invoke name="complete"') || functionCallsContent.includes('<invoke name=\'complete\'')) {
+                                                                                        detectedTag = 'complete';
+                                                                                        tagStartIndex = functionCallsIndex;
+                                                                                    } else {
+                                                                                        detectedTag = 'function_calls';
+                                                                                        tagStartIndex = functionCallsIndex;
+                                                                                    }
+                                                                                } else {
+                                                                                    // Fall back to old format detection
+                                                                                    for (const tag of HIDE_STREAMING_XML_TAGS) {
+                                                                                        if (tag === 'ask' || tag === 'complete') continue; // Already handled above
+                                                                                        const openingTagPattern = `<${tag}`;
+                                                                                        const index = streamingText.indexOf(openingTagPattern);
+                                                                                        if (index !== -1) {
+                                                                                            detectedTag = tag;
+                                                                                            tagStartIndex = index;
+                                                                                            break;
+                                                                                        }
                                                                                     }
                                                                                 }
                                                                             }
@@ -857,25 +689,29 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
 
                                                                         const textToRender = streamingText || '';
                                                                         const textBeforeTag = detectedTag ? textToRender.substring(0, tagStartIndex) : textToRender;
-                                                                        const showCursor = isStreamingText && !detectedTag;
+                                                                        
+                                                                        // For ask and complete, render as markdown directly (not as tool stream)
+                                                                        const isAskOrComplete = detectedTag === 'ask' || detectedTag === 'complete';
 
                                                                         return (
                                                                             <>
-                                                                                {/* In debug mode, show raw streaming content */}
-                                                                                {debugMode && streamingText ? (
-                                                                                    <pre className="text-xs font-mono whitespace-pre-wrap overflow-x-auto p-2 border border-border rounded-md bg-muted/30">
-                                                                                        {streamingText}
-                                                                                    </pre>
-                                                                                ) : (
-                                                                                    <>
-                                                                                        {textBeforeTag && (
+                                                                                {textBeforeTag && (
                                                                                             <ComposioUrlDetector content={textBeforeTag} className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none [&>:first-child]:mt-0 prose-headings:mt-3 break-words overflow-wrap-anywhere" />
                                                                                         )}
-                                                                                        {showCursor && (
-                                                                                            <span className="inline-block h-4 w-0.5 bg-primary ml-0.5 -mb-1 animate-pulse" />
-                                                                                        )}
 
-                                                                                        {detectedTag && (
+                                                                                        {detectedTag && isAskOrComplete ? (
+                                                                                            // Extract and render just the text content (strip all XML)
+                                                                                            (() => {
+                                                                                                const streamingContent = textToRender.substring(tagStartIndex);
+                                                                                                const extractedText = extractTextFromStreamingAskComplete(streamingContent, detectedTag as 'ask' | 'complete');
+                                                                                                return (
+                                                                                                    <ComposioUrlDetector 
+                                                                                                        content={extractedText} 
+                                                                                                        className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words [&>:first-child]:mt-0 prose-headings:mt-3" 
+                                                                                                    />
+                                                                                                );
+                                                                                            })()
+                                                                                        ) : detectedTag ? (
                                                                                             <ShowToolStream
                                                                                                 content={textToRender.substring(tagStartIndex)}
                                                                                                 messageId="streamingTextContent"
@@ -883,12 +719,147 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                                                                 showExpanded={true}
                                                                                                 startTime={Date.now()} // Tool just started now
                                                                                             />
-                                                                                        )}
-                                                                                    </>
-                                                                                )}
+                                                                                        ) : null}
                                                                             </>
                                                                         );
                                                                     })()}
+                                                                </div>
+                                                            )}
+
+                                                            {/* Show streaming tool call indicator OR streaming ask/complete text inside the last assistant group */}
+                                                            {groupIndex === finalGroupedMessages.length - 1 && 
+                                                                !readOnly && 
+                                                                streamingToolCall && 
+                                                                (() => {
+                                                                    // Check if this is ask/complete - render as text instead of tool indicator
+                                                                    const parsedMetadata = safeJsonParse<ParsedMetadata>(streamingToolCall.metadata, {});
+                                                                    const toolCalls = parsedMetadata.tool_calls || [];
+                                                                    
+                                                                    const askOrCompleteTool = toolCalls.find(tc => {
+                                                                        const toolName = tc.function_name?.replace(/_/g, '-').toLowerCase() || '';
+                                                                        return toolName === 'ask' || toolName === 'complete';
+                                                                    });
+                                                                    
+                                                                    // For ask/complete, render the text content directly
+                                                                    if (askOrCompleteTool) {
+                                                                        // Check if the last assistant message already has completed ask/complete
+                                                                        const currentGroupAssistantMessages = group.messages.filter(m => m.type === 'assistant');
+                                                                        const lastAssistantMessage = currentGroupAssistantMessages.length > 0 
+                                                                            ? currentGroupAssistantMessages[currentGroupAssistantMessages.length - 1] 
+                                                                            : null;
+                                                                        if (lastAssistantMessage) {
+                                                                            const lastMsgMetadata = safeJsonParse<ParsedMetadata>(lastAssistantMessage.metadata, {});
+                                                                            const lastMsgToolCalls = lastMsgMetadata.tool_calls || [];
+                                                                            const hasAskOrCompleteInLastMsg = lastMsgToolCalls.some(tc => {
+                                                                                const tn = tc.function_name?.replace(/_/g, '-').toLowerCase() || '';
+                                                                                return tn === 'ask' || tn === 'complete';
+                                                                            });
+                                                                            // If the last message already has ask/complete and is complete, skip
+                                                                            if (hasAskOrCompleteInLastMsg && lastMsgMetadata.stream_status === 'complete') {
+                                                                                return null;
+                                                                            }
+                                                                        }
+                                                                        
+                                                                        // Extract text from arguments
+                                                                        const toolArgs: any = askOrCompleteTool.arguments;
+                                                                        let askCompleteText = '';
+                                                                        if (toolArgs) {
+                                                                            if (typeof toolArgs === 'string') {
+                                                                                try {
+                                                                                    const parsed = JSON.parse(toolArgs);
+                                                                                    askCompleteText = parsed?.text || '';
+                                                                                } catch (e) {
+                                                                                    askCompleteText = extractTextFromPartialJson(toolArgs);
+                                                                                }
+                                                                            } else if (typeof toolArgs === 'object' && toolArgs !== null) {
+                                                                                askCompleteText = toolArgs?.text || '';
+                                                                            }
+                                                                        }
+                                                                        
+                                                                        const toolName = askOrCompleteTool.function_name?.replace(/_/g, '-').toLowerCase() || '';
+                                                                        const textToShow = askCompleteText || (toolName === 'ask' ? 'Asking...' : 'Completing...');
+                                                                        
+                                                                        return (
+                                                                            <div className="mt-2">
+                                                                                <ComposioUrlDetector 
+                                                                                    content={textToShow} 
+                                                                                    className="text-sm prose prose-sm dark:prose-invert chat-markdown max-w-none break-words [&>:first-child]:mt-0 prose-headings:mt-3" 
+                                                                                />
+                                                                            </div>
+                                                                        );
+                                                                    }
+                                                                    
+                                                                    // For non-ask/complete tools, check if any tool calls exist
+                                                                    const isAskOrComplete = toolCalls.some(tc => {
+                                                                        const toolName = tc.function_name?.replace(/_/g, '-').toLowerCase() || '';
+                                                                        return toolName === 'ask' || toolName === 'complete';
+                                                                    });
+                                                                    
+                                                                    // Don't render tool call indicator for ask/complete - they're handled above
+                                                                    if (isAskOrComplete) {
+                                                                        return null;
+                                                                    }
+                                                                    
+                                                                    return (
+                                                                        <div className="mt-2">
+                                                                            <div className="my-1">
+                                                                                {(() => {
+                                                                                    // Extract tool call info from streamingToolCall metadata
+                                                                                    if (toolCalls.length > 0) {
+                                                                                        const firstToolCall = toolCalls[0];
+                                                                                        const toolName = firstToolCall.function_name?.replace(/_/g, '-') || '';
+                                                                                        const IconComponent = getToolIcon(toolName);
+                                                                                        
+                                                                                        // Extract display parameter (same logic as rendered version)
+                                                                                        let paramDisplay = '';
+                                                                                        if (firstToolCall.arguments) {
+                                                                                            const args = typeof firstToolCall.arguments === 'string' 
+                                                                                                ? safeJsonParse<Record<string, any>>(firstToolCall.arguments, {})
+                                                                                                : firstToolCall.arguments;
+                                                                                            paramDisplay = (args as any)?.file_path || (args as any)?.command || (args as any)?.query || (args as any)?.url || '';
+                                                                                        }
+                                                                                        
+                                                                                        return (
+                                                                                            <div className="inline-flex items-center gap-1.5 py-1 px-1 pr-1.5 text-xs text-muted-foreground bg-muted rounded-lg border border-neutral-200 dark:border-neutral-700/50">
+                                                                                                <div className='border-2 bg-gradient-to-br from-neutral-200 to-neutral-300 dark:from-neutral-700 dark:to-neutral-800 flex items-center justify-center p-0.5 rounded-sm border-neutral-400/20 dark:border-neutral-600'>
+                                                                                                    <CircleDashed className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0 animate-spin animation-duration-2000" />
+                                                                                                </div>
+                                                                                                <span className="font-mono text-xs text-foreground">
+                                                                                                    {getUserFriendlyToolName(toolName)}
+                                                                                                </span>
+                                                                                                {paramDisplay && (
+                                                                                                    <span className="ml-1 text-xs text-muted-foreground truncate max-w-[200px]" title={paramDisplay}>
+                                                                                                        {paramDisplay}
+                                                                                                    </span>
+                                                                                                )}
+                                                                                            </div>
+                                                                                        );
+                                                                                    }
+                                                                                    
+                                                                                    // Fallback if no tool calls found
+                                                                                    return (
+                                                                                        <div className="inline-flex items-center gap-1.5 py-1 px-1 pr-1.5 text-xs text-muted-foreground bg-muted rounded-lg border border-neutral-200 dark:border-neutral-700/50">
+                                                                                            <div className='border-2 bg-gradient-to-br from-neutral-200 to-neutral-300 dark:from-neutral-700 dark:to-neutral-800 flex items-center justify-center p-0.5 rounded-sm border-neutral-400/20 dark:border-neutral-600'>
+                                                                                                <CircleDashed className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0 animate-spin animation-duration-2000" />
+                                                                                            </div>
+                                                                                            <span className="font-mono text-xs text-foreground">Using Tool</span>
+                                                                                        </div>
+                                                                                    );
+                                                                                })()}
+                                                                            </div>
+                                                                        </div>
+                                                                    );
+                                                                })()}
+
+                                                            {/* Show loader when agent is running but not streaming, inside the last assistant group */}
+                                                            {groupIndex === finalGroupedMessages.length - 1 && 
+                                                                !readOnly && 
+                                                                (agentStatus === 'running' || agentStatus === 'connecting') && 
+                                                                !streamingTextContent && 
+                                                                !streamingToolCall &&
+                                                                (streamHookStatus === 'streaming' || streamHookStatus === 'connecting') && (
+                                                                <div className="mt-2">
+                                                                    <AgentLoader />
                                                                 </div>
                                                             )}
                                                         </div>
@@ -900,9 +871,12 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                     return null;
                                 });
                             })()}
-                            {((agentStatus === 'running' || agentStatus === 'connecting') && !streamingTextContent &&
+
+                            {/* Show loader as new assistant group only when there's no assistant group (last message is user or no messages) and agent is running */}
+                            {((agentStatus === 'running' || agentStatus === 'connecting') && !streamingTextContent && !streamingToolCall &&
                                 !readOnly &&
-                                (messages.length === 0 || messages[messages.length - 1].type === 'user')) && (
+                                (streamHookStatus === 'streaming' || streamHookStatus === 'connecting') &&
+                                (displayMessages.length === 0 || displayMessages[displayMessages.length - 1].type === 'user')) && (
                                     <div ref={latestMessageRef} className='w-full h-22 rounded'>
                                         <div className="flex flex-col gap-2">
                                             {/* Logo positioned above the loader */}
@@ -973,7 +947,7 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                     </div>
                                 </div>
                             )}
-                            <div className="!h-48" />
+                            <div className="!h-8" />
                         </div>
                     </div>
                 </div>

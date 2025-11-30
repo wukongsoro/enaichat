@@ -5,12 +5,9 @@ import jwt
 from jwt.exceptions import PyJWTError
 from core.utils.logger import structlog
 from core.utils.config import config
-import os
-import base64
-import hashlib
-import hmac
 from core.services.supabase import DBConnection
 from core.services import redis
+from core.utils.logger import logger, structlog
 
 async def verify_admin_api_key(x_admin_api_key: Optional[str] = Header(None)):
     if not config.KORTIX_ADMIN_API_KEY:
@@ -194,17 +191,35 @@ async def verify_and_get_user_id_from_jwt(request: Request) -> str:
             detail="Invalid token",
             headers={"WWW-Authenticate": "Bearer"}
         )
+
+
+async def get_optional_user_id_from_jwt(request: Request) -> Optional[str]:
+    try:
+        return await verify_and_get_user_id_from_jwt(request)
+    except HTTPException:
+        return None
+
     
 async def get_user_id_from_stream_auth(
     request: Request,
     token: Optional[str] = None
 ) -> str:
+    """
+    Authenticate user for streaming endpoints.
+    Supports JWT via Authorization header or token query param.
+    """
+    logger.debug(f"🔐 get_user_id_from_stream_auth called - has_token: {bool(token)}")
+    
     try:
+        # Try JWT header first
         try:
-            return await verify_and_get_user_id_from_jwt(request)
+            user_id = await verify_and_get_user_id_from_jwt(request)
+            logger.debug(f"✅ Authenticated via JWT header: {user_id[:8]}...")
+            return user_id
         except HTTPException:
             pass
         
+        # Try token query param (for SSE/EventSource which can't set headers)
         if token:
             try:
                 payload = _decode_jwt_safely(token)
@@ -215,13 +230,14 @@ async def get_user_id_from_stream_auth(
                         user_id=user_id,
                         auth_method="jwt_query"
                     )
+                    logger.debug(f"✅ Authenticated via token param: {user_id[:8]}...")
                     return user_id
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"❌ Token param auth failed: {str(e)}")
         
         raise HTTPException(
             status_code=401,
-            detail="No valid authentication credentials found",
+            detail="Authentication required",
             headers={"WWW-Authenticate": "Bearer"}
         )
     except HTTPException:
@@ -229,15 +245,8 @@ async def get_user_id_from_stream_auth(
     except Exception as e:
         error_msg = str(e)
         if "cannot schedule new futures after shutdown" in error_msg or "connection is closed" in error_msg:
-            raise HTTPException(
-                status_code=503,
-                detail="Server is shutting down"
-            )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error during authentication: {str(e)}"
-            )
+            raise HTTPException(status_code=503, detail="Server is shutting down")
+        raise HTTPException(status_code=500, detail=f"Authentication error: {str(e)}")
 
 async def get_optional_user_id(request: Request) -> Optional[str]:
     auth_header = request.headers.get('Authorization')

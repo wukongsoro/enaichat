@@ -20,7 +20,9 @@ import {
 
 import { useFileContent, useImageContent } from '@/hooks/files';
 import { useAuth } from '@/components/AuthProvider';
-import { Project } from '@/lib/api/projects';
+import { Project } from '@/lib/api/threads';
+import { PresentationSlidePreview } from '@/components/thread/tool-views/presentation-tools/PresentationSlidePreview';
+import { usePresentationViewerStore } from '@/stores/presentation-viewer-store';
 
 // Define basic file types
 export type FileType =
@@ -29,6 +31,31 @@ export type FileType =
     | 'archive' | 'database' | 'markdown'
     | 'csv'
     | 'other';
+
+// Helper function to check if a filepath is a presentation attachment
+function isPresentationAttachment(filepath: string): boolean {
+    // Check if it matches patterns like:
+    // - presentations/[name]/slide_01.html
+    // - presentations/[name]/metadata.json
+    const presentationPattern = /^presentations\/([^\/]+)\/(slide_\d+\.html|metadata\.json)$/i;
+    return presentationPattern.test(filepath);
+}
+
+// Helper function to extract presentation name from filepath
+function extractPresentationName(filepath: string): string | null {
+    const match = filepath.match(/^presentations\/([^\/]+)\//i);
+    return match ? match[1] : null;
+}
+
+// Helper function to extract slide number from filepath
+function extractSlideNumber(filepath: string): number | null {
+    // Match patterns like slide_01.html, slide_1.html, etc.
+    const match = filepath.match(/slide_(\d+)\.html$/i);
+    if (match) {
+        return parseInt(match[1], 10);
+    }
+    return null;
+}
 
 // Simple extension-based file type detection
 function getFileType(filename: string): FileType {
@@ -190,6 +217,7 @@ export function FileAttachment({
 }: FileAttachmentProps) {
     // Authentication 
     const { session } = useAuth();
+    const { openPresentation } = usePresentationViewerStore();
 
     // Simplified state management
     const [hasError, setHasError] = React.useState(false);
@@ -227,7 +255,8 @@ export function FileAttachment({
     const {
         data: fileContent,
         isLoading: fileContentLoading,
-        error: fileContentError
+        error: fileContentError,
+        failureCount: fileRetryAttempt
     } = useFileContent(
         shouldLoadContent ? sandboxId : undefined,
         shouldLoadContent ? filepath : undefined
@@ -237,7 +266,8 @@ export function FileAttachment({
     const {
         data: imageUrl,
         isLoading: imageLoading,
-        error: imageError
+        error: imageError,
+        failureCount: imageRetryAttempt
     } = useImageContent(
         isImage && showPreview && sandboxId ? sandboxId : undefined,
         isImage && showPreview ? filepath : undefined
@@ -275,10 +305,13 @@ export function FileAttachment({
         );
     };
 
-    // Set error state based on query errors
+    // Set error state based on query errors - but only after retries exhausted
     React.useEffect(() => {
         const anyError = fileContentError || imageError || pdfError || xlsxError;
-        if (anyError) {
+        const isStillRetrying = imageRetryAttempt < 15 || fileRetryAttempt < 15;
+        
+        if (anyError && !isStillRetrying) {
+            // Only show error after retries exhausted
             // Check if it's a sandbox deleted error
             if (isSandboxDeletedError(anyError)) {
                 setIsSandboxDeleted(true);
@@ -287,8 +320,12 @@ export function FileAttachment({
                 setHasError(true);
                 setIsSandboxDeleted(false);
             }
+        } else if (!anyError) {
+            // Clear error state if no error
+            setHasError(false);
+            setIsSandboxDeleted(false);
         }
-    }, [fileContentError, imageError, pdfError, xlsxError]);
+    }, [fileContentError, imageError, pdfError, xlsxError, imageRetryAttempt, fileRetryAttempt]);
 
     // Reset image loaded state when URL changes
     React.useEffect(() => {
@@ -362,6 +399,35 @@ export function FileAttachment({
             window.open(fileUrl, '_blank');
         }
     };
+
+    // Check if this is a presentation attachment - render with PresentationSlidePreview
+    if (isPresentationAttachment(filepath) && project) {
+        const presentationName = extractPresentationName(filepath);
+        const slideNumber = extractSlideNumber(filepath);
+        if (presentationName && project?.sandbox?.sandbox_url) {
+            return (
+                <PresentationSlidePreview
+                    presentationName={presentationName}
+                    project={project}
+                    initialSlide={slideNumber || undefined}
+                    onFullScreenClick={(slideNum) => {
+                        // Open the full-screen presentation viewer modal
+                        console.log('[FileAttachment] Opening presentation:', {
+                            presentationName,
+                            sandboxUrl: project.sandbox.sandbox_url,
+                            slideNumber: slideNum || slideNumber || 1
+                        });
+                        openPresentation(
+                            presentationName,
+                            project.sandbox.sandbox_url,
+                            slideNum || slideNumber || 1
+                        );
+                    }}
+                    className={className}
+                />
+            );
+        }
+    }
 
     // Images are displayed with their natural aspect ratio
     if (isImage && showPreview) {
@@ -457,8 +523,13 @@ export function FileAttachment({
             >
                 {/* Show loading spinner overlay while image is loading */}
                 {!imageLoaded && isGridLayout && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-black/5 to-black/10 dark:from-white/5 dark:to-white/10 z-10">
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-black/5 to-black/10 dark:from-white/5 dark:to-white/10 z-10">
                         <Loader2 className="h-8 w-8 text-primary animate-spin" />
+                        {imageRetryAttempt > 0 && (
+                            <div className="text-xs text-muted-foreground bg-background/80 px-2 py-1 rounded">
+                                Retrying... (attempt {imageRetryAttempt + 1})
+                            </div>
+                        )}
                     </div>
                 )}
                 
@@ -655,8 +726,13 @@ export function FileAttachment({
 
                     {/* Loading state */}
                     {fileContentLoading && !isPdf && (
-                        <div className="absolute inset-0 flex items-center justify-center bg-background/50 z-10">
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-background/50 z-10">
                             <Loader2 className="h-8 w-8 text-primary animate-spin" />
+                            {fileRetryAttempt > 0 && (
+                                <div className="text-xs text-muted-foreground bg-background/80 px-2 py-1 rounded">
+                                    Retrying... (attempt {fileRetryAttempt + 1})
+                                </div>
+                            )}
                         </div>
                     )}
 

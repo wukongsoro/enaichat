@@ -30,7 +30,7 @@ import {
   TrendingDown,
 } from 'lucide-react';
 import { useAccounts } from '@/hooks/account';
-import { useSubscription } from '@/hooks/billing';
+import { useAccountState } from '@/hooks/billing';
 
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
@@ -64,11 +64,15 @@ import {
 } from '@/components/ui/dialog';
 import { createClient } from '@/lib/supabase/client';
 import { useTheme } from 'next-themes';
-import { isLocalMode } from '@/lib/config';
+import { isLocalMode, isProductionMode } from '@/lib/config';
 import { clearUserLocalStorage } from '@/lib/utils/clear-local-storage';
 import { UserSettingsModal } from '@/components/settings/user-settings-modal';
 import { PlanSelectionModal } from '@/components/billing/pricing';
 import { TierBadge } from '@/components/billing/tier-badge';
+import { useTranslations } from 'next-intl';
+import { useReferralDialog } from '@/stores/referral-dialog';
+import { ReferralDialog } from '@/components/referrals/referral-dialog';
+import { Badge } from '@/components/ui/badge';
 
 export function NavUserWithTeams({
   user,
@@ -82,21 +86,22 @@ export function NavUserWithTeams({
     planIcon?: string;
   };
 }) {
+  const t = useTranslations('sidebar');
   const router = useRouter();
   const { isMobile } = useSidebar();
   const { data: accounts } = useAccounts();
-  const { data: subscriptionData } = useSubscription({ enabled: true });
+  const { data: accountState } = useAccountState({ enabled: true });
   const [showNewTeamDialog, setShowNewTeamDialog] = React.useState(false);
   const [showSettingsModal, setShowSettingsModal] = React.useState(false);
   const [showPlanModal, setShowPlanModal] = React.useState(false);
   const [settingsTab, setSettingsTab] = React.useState<'general' | 'billing' | 'usage' | 'env-manager'>('general');
+  const { isOpen: isReferralDialogOpen, openDialog: openReferralDialog, closeDialog: closeReferralDialog } = useReferralDialog();
   const { theme, setTheme } = useTheme();
 
   // Check if user is on free tier
-  const isFreeTier = subscriptionData?.tier_key === 'free' ||
-    subscriptionData?.tier?.name === 'free' ||
-    subscriptionData?.plan_name === 'free' ||
-    !subscriptionData?.tier_key;
+  const isFreeTier = accountState?.subscription?.tier_key === 'free' ||
+    accountState?.tier?.name === 'free' ||
+    !accountState?.subscription?.tier_key;
 
   // Prepare personal account and team accounts
   const personalAccount = React.useMemo(
@@ -198,6 +203,33 @@ export function NavUserWithTeams({
     <Dialog open={showNewTeamDialog} onOpenChange={setShowNewTeamDialog}>
       <SidebarMenu>
         <SidebarMenuItem className="relative">
+          {/* Buttons Container - Above user card */}
+          <div className="absolute bottom-full left-0 right-0 mb-2 px-0 group-data-[collapsible=icon]:hidden z-50 flex flex-col gap-2">
+            {/* Referral Button - Above Upgrade */}
+            {!isProductionMode() && (
+              <Button
+                onClick={openReferralDialog}
+                variant="outline"
+                size="lg"
+                className="w-full items-center gap-2 px-3 hover:bg-muted/50 transition-colors"
+              >
+                <Users className="h-4 w-4 flex-shrink-0" />
+                <span className="text-sm flex-1 text-left">{t('referAndEarn')}</span>
+                <span className="text-xs font-semibold text-primary flex-shrink-0">+400</span>
+              </Button>
+            )}
+            {/* Upgrade Button - Closest to user card */}
+            {isFreeTier && (
+              <Button
+                onClick={() => setShowPlanModal(true)}
+                variant="default"
+                size="lg"
+                className="w-full"
+              >
+                {t('upgrade')}
+              </Button>
+            )}
+          </div>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <SidebarMenuButton
@@ -231,7 +263,7 @@ export function NavUserWithTeams({
               {personalAccount && (
                 <>
                   <DropdownMenuLabel className="text-muted-foreground text-xs px-2 py-1.5">
-                    Workspaces
+                    {t('workspaces')}
                   </DropdownMenuLabel>
                   <DropdownMenuItem
                     key={personalAccount.account_id}
@@ -371,7 +403,7 @@ export function NavUserWithTeams({
                     <Sun className="h-4 w-4 absolute rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
                     <Moon className="h-4 w-4 absolute rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
                   </div>
-                  <span>Theme</span>
+                  <span>{t('theme')}</span>
                 </DropdownMenuItem>
               </DropdownMenuGroup>
 
@@ -387,6 +419,14 @@ export function NavUserWithTeams({
                         <Link href="/admin/billing" className="gap-2 p-2">
                           <Shield className="h-4 w-4" />
                           <span>Admin Panel</span>
+                        </Link>
+                      </DropdownMenuItem>
+                    )}
+                    {user.isAdmin && (
+                      <DropdownMenuItem asChild>
+                        <Link href="/admin/notifications" className="gap-2 p-2">
+                          <Bell className="h-4 w-4" />
+                          <span>Notifications</span>
                         </Link>
                       </DropdownMenuItem>
                     )}
@@ -417,24 +457,10 @@ export function NavUserWithTeams({
               <DropdownMenuSeparator className="my-1" />
               <DropdownMenuItem onClick={handleLogout} className="gap-2 p-2">
                 <LogOut className="h-4 w-4" />
-                <span>Log Out</span>
+                <span>{t('logout')}</span>
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-
-          {/* Upgrade Button - Only for Free Tier */}
-          {isFreeTier && (
-            <div className="absolute bottom-full left-0 right-0 mb-2 px-0 group-data-[collapsible=icon]:hidden z-50">
-              <Button
-                onClick={() => setShowPlanModal(true)}
-                variant="default"
-                size="lg"
-                className="w-full relative z-50"
-              >
-                Upgrade
-              </Button>
-            </div>
-          )}
         </SidebarMenuItem>
       </SidebarMenu>
 
@@ -463,6 +489,12 @@ export function NavUserWithTeams({
         open={showPlanModal}
         onOpenChange={setShowPlanModal}
         returnUrl={typeof window !== 'undefined' ? window?.location?.href || '/' : '/'}
+      />
+      
+      {/* Referral Dialog */}
+      <ReferralDialog
+        open={isReferralDialogOpen}
+        onOpenChange={closeReferralDialog}
       />
     </Dialog>
   );

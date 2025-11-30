@@ -1,27 +1,34 @@
-import type { ParsedToolData } from '@/lib/utils/tool-parser';
+import type { ToolCallData, ToolResultData } from '../types';
 
 export interface AskToolData {
   text: string | null;
   attachments: string[];
+  follow_up_answers: string[];
   success: boolean;
 }
 
-const parseContent = (content: any): any => {
-  if (typeof content === 'string') {
-    try {
-      return JSON.parse(content);
-    } catch (e) {
-      return content;
+export function extractAskData(
+  toolCall: ToolCallData,
+  toolResult?: ToolResultData,
+  isSuccess: boolean = true
+): AskToolData {
+  // Parse arguments
+  let args: Record<string, any> = {};
+  if (toolCall.arguments) {
+    if (typeof toolCall.arguments === 'object' && toolCall.arguments !== null) {
+      args = toolCall.arguments;
+    } else if (typeof toolCall.arguments === 'string') {
+      try {
+        args = JSON.parse(toolCall.arguments);
+      } catch {
+        args = {};
+      }
     }
   }
-  return content;
-};
-
-export function extractAskData(toolData: ParsedToolData): AskToolData {
-  const { arguments: args, result } = toolData;
   
   let text = args?.text || null;
   let attachments: string[] = [];
+  let follow_up_answers: string[] = [];
   
   if (args?.attachments) {
     if (typeof args.attachments === 'string') {
@@ -31,10 +38,15 @@ export function extractAskData(toolData: ParsedToolData): AskToolData {
     }
   }
   
+  if (args?.follow_up_answers && Array.isArray(args.follow_up_answers)) {
+    follow_up_answers = args.follow_up_answers.filter((a: string) => a && a.trim().length > 0);
+  }
+  
   return {
     text,
     attachments,
-    success: result.success ?? true
+    follow_up_answers,
+    success: toolResult?.success ?? isSuccess
   };
 }
 

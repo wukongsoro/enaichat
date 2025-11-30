@@ -8,9 +8,11 @@ import { Icons } from './home/icons';
 import { useAuthMethodTracking } from '@/stores/auth-tracking';
 import { Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { useTranslations } from 'next-intl';
 
 interface GitHubSignInProps {
   returnUrl?: string;
+  referralCode?: string;
 }
 
 interface AuthMessage {
@@ -19,9 +21,10 @@ interface AuthMessage {
   returnUrl?: string;
 }
 
-export default function GitHubSignIn({ returnUrl }: GitHubSignInProps) {
+export default function GitHubSignIn({ returnUrl, referralCode }: GitHubSignInProps) {
   const [isLoading, setIsLoading] = useState(false);
   const { resolvedTheme } = useTheme();
+  const t = useTranslations('auth');
 
   const { wasLastMethod, markAsUsed } = useAuthMethodTracking('github');
 
@@ -101,6 +104,10 @@ export default function GitHubSignIn({ returnUrl }: GitHubSignInProps) {
       if (returnUrl) {
         sessionStorage.setItem('github-returnUrl', returnUrl || '/dashboard');
       }
+      
+      if (referralCode) {
+        document.cookie = `pending-referral-code=${referralCode.trim().toUpperCase()}; path=/; max-age=600; SameSite=Lax`;
+      }
 
       const popup = window.open(
         `${window.location.origin}/auth/github-popup`,
@@ -164,7 +171,7 @@ export default function GitHubSignIn({ returnUrl }: GitHubSignInProps) {
           <Icons.github className="w-4 h-4" />
         )}
         <span>
-          {isLoading ? 'Signing in...' : 'Continue with GitHub'}
+          {isLoading ? t('signingIn') : t('continueWithGitHub')}
         </span>
       </Button>
 

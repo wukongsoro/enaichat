@@ -1,4 +1,4 @@
-import type { ParsedToolData } from '@/lib/utils/tool-parser';
+import type { ToolCallData, ToolResultData } from '../types';
 
 export interface WebSearchResult {
   title: string;
@@ -11,6 +11,14 @@ export interface WebSearchData {
   results: WebSearchResult[];
   images: string[];
   success: boolean;
+  isBatch?: boolean;
+  batchResults?: Array<{
+    query: string;
+    success: boolean;
+    results: WebSearchResult[];
+    answer: string;
+    images: string[];
+  }>;
 }
 
 const parseContent = (content: any): any => {
@@ -24,18 +32,69 @@ const parseContent = (content: any): any => {
   return content;
 };
 
-export function extractWebSearchData(toolData: ParsedToolData): WebSearchData {
-  const { arguments: args, result } = toolData;
+export function extractWebSearchData(
+  toolCall: ToolCallData,
+  toolResult?: ToolResultData,
+  isSuccess: boolean = true
+): WebSearchData {
+  // Parse arguments
+  let args: Record<string, any> = {};
+  if (toolCall.arguments) {
+    if (typeof toolCall.arguments === 'object' && toolCall.arguments !== null) {
+      args = toolCall.arguments;
+    } else if (typeof toolCall.arguments === 'string') {
+      try {
+        args = JSON.parse(toolCall.arguments);
+      } catch {
+        args = {};
+      }
+    }
+  }
   
   let query = args?.query || null;
   let results: WebSearchResult[] = [];
   let images: string[] = [];
   
-  if (result.output) {
-    const output = typeof result.output === 'string' 
-      ? parseContent(result.output) 
-      : result.output;
+  if (toolResult?.output) {
+    const output = typeof toolResult.output === 'string' 
+      ? parseContent(toolResult.output) 
+      : toolResult.output;
     
+    // Check if this is a batch search response
+    if (output.batch_mode === true && Array.isArray(output.results)) {
+      // Batch search response
+      const batchResults = output.results.map((batchItem: any) => ({
+        query: batchItem.query || '',
+        success: batchItem.success !== false,
+        results: (batchItem.results || []).map((r: any) => ({
+          title: r.title || '',
+          url: r.url || '',
+          snippet: r.content || r.snippet || ''
+        })),
+        answer: batchItem.answer || '',
+        images: batchItem.images || []
+      }));
+
+      // Flatten all results and images for combined display
+      const allResults = batchResults.flatMap(br => br.results);
+      const allImages = batchResults.flatMap(br => br.images);
+      const allQueries = batchResults.map(br => br.query).filter(Boolean);
+      const combinedQuery = allQueries.length > 1 
+        ? `${allQueries.length} queries` 
+        : allQueries[0] || null;
+      const allSuccessful = batchResults.every(br => br.success);
+
+      return {
+        query: combinedQuery,
+        results: allResults,
+        images: allImages,
+        success: allSuccessful,
+        isBatch: true,
+        batchResults
+      };
+    }
+    
+    // Handle legacy batch_results format (for image search)
     if (output.batch_results && Array.isArray(output.batch_results)) {
       images = output.batch_results.reduce((acc: string[], res: any) => {
         return acc.concat(res.images || []);
@@ -62,7 +121,8 @@ export function extractWebSearchData(toolData: ParsedToolData): WebSearchData {
     query,
     results,
     images,
-    success: result.success ?? true
+    success: toolResult?.success ?? isSuccess,
+    isBatch: false
   };
 }
 
